@@ -1,0 +1,132 @@
+# Title: Cloud pricing
+# Description:
+# This example shows how we can write a script to compare the pricing of the
+# different cloud providers for our sample infrastructure.
+#  
+# Our infrastructure:
+# - Users Service
+#   - SQL db
+# - Post Service
+#   - SQL db
+# - Shop Service
+#   - SQL db
+#   - Redis db
+
+param service_users_scale = 1;
+param sql_db_users_scale = 1;
+
+param service_post_scale = 1;
+param sql_db_post_scale = 2;
+
+param service_shop_scale = 4;
+param sql_db_shop_scale = 2;
+param redis_shop_scale = 6;
+
+param daily_active_users;
+
+# 1000 user = 1 scale
+cell scale:
+  daily_active_users / 1000
+;
+
+cell total_service_scale:
+  scale * (service_users_scale + service_post_scale + service_shop_scale)
+;
+
+cell total_sql_db_scale:
+  scale * (sql_db_users_scale + sql_db_post_scale + sql_db_shop_scale)
+;
+
+cell total_redis_scale:
+  scale * redis_shop_scale
+;
+
+# one scale equals:
+# - service:
+#   - 0.25 vCPU core
+#   - 128mb RAM
+# - sql db:
+#   - 0.5 vCPU core
+#   - 256mb RAM
+#   - if scale < 10 ? 10gb : 30gb 
+# - redis:
+#   - 0.25 vCPU core
+#   - 1024mb RAM
+
+# overhead = OS + other softwares
+param overhead_cpu = 4;
+param overhead_ram = 4096;
+param overhead_storage = 50;
+
+cell total_cpu_core:
+  overhead_cpu
+  + total_service_scale * 0.25
+  + total_sql_db_scale * 0.5 
+  + total_redis_scale * 0.25
+;
+
+cell total_ram:
+  overhead_ram
+  + total_service_scale * 128
+  + total_sql_db_scale * 256
+  + total_redis_scale * 1024
+;
+
+cell total_storage:
+  overhead_storage
+  + (
+      total_sql_db_scale 
+      * (scale < 10 ? 10 : 30)
+    )
+;
+
+# 1vCPU core = x dollar
+param gcp_cpu_core_cost = 1;
+param aws_cpu_core_cost = 1.3;
+param azure_cpu_core_cost = 1.2;
+
+# 1 gb = x dollars
+param gcp_ram_cost = 8; 
+param aws_storage_cost = 7.5;
+param azure_storage_cost = 7;
+
+# 1 gb = x dollars
+param gcp_storage_cost = 0.5; 
+param aws_storage_cost = 0.1;
+param azure_storage_cost = 0.2;
+
+param provider;
+
+cell cpu_cost:
+  total_cpu_core * (
+    provider == "gcp"
+    ? gcp_cpu_core_cost
+    : provider == "aws"
+    ? aws_cpu_core_cost
+    : azure_cpu_core_cost
+  )
+;
+
+cell ram_cost:
+  total_ram * (
+    provider == "gcp"
+    ? gcp_ram_cost
+    : provider == "aws"
+    ? aws_ram_cost
+    : azure_ram_cost
+  )
+;
+
+cell storage_cost:
+  total_storage * (
+    provider == "gcp"
+    ? gcp_storage_cost
+    : provider == "aws"
+    ? aws_storage_cost
+    : azure_storage_cost
+  )
+;
+
+
+cell total_cost:
+  cpu_cost + ram_cost + storage_cost
