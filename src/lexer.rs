@@ -1,3 +1,5 @@
+use std::iter::Peekable;
+
 use anyhow::bail;
 
 #[derive(Debug)]
@@ -5,7 +7,6 @@ pub enum Token<'a> {
     Comment(&'a str),
     Param,
     Ident(&'a str),
-    Assign,
     Colon,
     SemiColon,
     StringLiteral(&'a str),
@@ -16,13 +17,25 @@ pub enum Token<'a> {
     Equal,
     Add,
     Sub,
+    Div,
     ParOpen,
     ParClose,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
 }
 
 pub fn lex(input: &'_ str) -> Result<Vec<Token<'_>>, anyhow::Error> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().enumerate().peekable().into_iter();
+
+    macro_rules! add_single_char_token {
+        ($token:ident) => {{
+            chars.next();
+            tokens.push(Token::$token);
+        }};
+    }
 
     while let Some(x) = chars.peek() {
         let (i, c) = *x; // drop mutable borrow
@@ -32,8 +45,45 @@ pub fn lex(input: &'_ str) -> Result<Vec<Token<'_>>, anyhow::Error> {
                 // skip whitespace here
                 chars.next();
             }
-            _ => {
-                todo!();
+            '(' => add_single_char_token!(ParOpen),
+            ')' => add_single_char_token!(ParClose),
+            ';' => add_single_char_token!(SemiColon),
+            ':' => add_single_char_token!(Colon),
+            '?' => add_single_char_token!(QuestionMark),
+            '*' => add_single_char_token!(Mul),
+            '+' => {
+                chars.next();
+                if let Some((_, c)) = chars.peek() {
+                    if c.is_numeric() {
+                        lex_number(input, &mut tokens, &mut chars, i, Sign::Positive)?
+                    } else {
+                        add_single_char_token!(Add);
+                    }
+                } else {
+                    add_single_char_token!(Add);
+                }
+            }
+            '-' => {
+                chars.next();
+                if let Some((_, c)) = chars.peek() {
+                    if c.is_numeric() {
+                        lex_number(input, &mut tokens, &mut chars, i, Sign::Negative)?
+                    } else {
+                        add_single_char_token!(Sub);
+                    }
+                } else {
+                    add_single_char_token!(Sub);
+                }
+            }
+            '/' => add_single_char_token!(Div),
+            '=' | '>' | '<' => lex_operator(&mut tokens, &mut chars)?,
+            '\"' => lex_string(input, &mut tokens, &mut chars, i)?,
+            c => {
+                if c.is_numeric() {
+                    lex_number(input, &mut tokens, &mut chars, i, Sign::Unknown)?
+                } else {
+                    lex_ident(input, &mut tokens, &mut chars, i)?
+                }
             }
         }
     }
@@ -42,6 +92,134 @@ pub fn lex(input: &'_ str) -> Result<Vec<Token<'_>>, anyhow::Error> {
 }
 
 type State = (usize, char);
+
+enum Sign {
+    Positive,
+    Negative,
+    Unknown,
+}
+
+
+/// FIXME: this function consumes one extra character
+fn lex_number<'a, I: Iterator<Item = State>>(
+    input: &'a str,
+    tokens: &mut Vec<Token<'a>>,
+    chars: &mut Peekable<I>,
+    last_i: usize,
+    sign: Sign,
+) -> Result<(), anyhow::Error> {
+    let mut number_str = String::with_capacity(6);
+    if matches!(sign, Sign::Negative) {
+        number_str.push('-');
+    }
+    let mut offset = 0;
+    while let Some((_, c)) = chars.next() {
+        offset += 1;
+        number_str.push(c);
+        let result: Result<f64, _> = number_str.parse();
+        if result.is_err() {
+            break;
+        }
+    }
+    let ident = match sign {
+        Sign::Positive | Sign::Negative => &input[last_i..last_i + offset],
+        Sign::Unknown => &input[last_i..last_i + offset - 1],
+    };
+    let token = Token::NumberLiteral(ident);
+    tokens.push(token);
+    Ok(())
+}
+
+fn lex_string<'a, I: Iterator<Item = State>>(
+    input: &'a str,
+    tokens: &mut Vec<Token<'a>>,
+    chars: &mut Peekable<I>,
+    last_i: usize,
+) -> Result<(), anyhow::Error> {
+    let mut offset = 0;
+    let mut string_closed = false;
+    while chars.next().is_some() {
+        offset += 1;
+        if let Some((_, next_c)) = chars.peek() {
+            if *next_c == '\"' {
+                chars.next();
+                string_closed = true;
+                break;
+            }
+        }
+    }
+    if !string_closed {
+        bail!("string literal opened but never closed");
+    }
+    let ident = &input[last_i + 1..last_i + offset];
+    let token = Token::StringLiteral(ident);
+    tokens.push(token);
+    Ok(())
+}
+
+fn lex_operator<'a, I: Iterator<Item = State>>(
+    tokens: &mut Vec<Token<'a>>,
+    chars: &mut Peekable<I>,
+) -> Result<(), anyhow::Error> {
+    let (_, a) = chars.next().unwrap();
+
+    let token = match a {
+        '=' => {
+            if let Some((_, next)) = chars.peek() {
+                if *next == '=' {
+                    chars.next();
+                    Token::Equal
+                } else {
+                    bail!("expected char = bot got {}", next);
+                }
+            } else {
+                bail!("expected char = bot got EOF");
+            }
+        }
+        '>' => match chars.peek() {
+            Some((_, '=')) => {
+                chars.next();
+                Token::GreaterThanOrEqual
+            }
+            _ => Token::GreaterThan,
+        },
+        '<' => match chars.peek() {
+            Some((_, '=')) => {
+                chars.next();
+                Token::LessThanOrEqual
+            }
+            _ => Token::LessThan,
+        },
+        _ => bail!("unreachable"),
+    };
+    tokens.push(token);
+    Ok(())
+}
+
+fn lex_ident<'a, I: Iterator<Item = State>>(
+    input: &'a str,
+    tokens: &mut Vec<Token<'a>>,
+    chars: &mut Peekable<I>,
+    last_i: usize,
+) -> Result<(), anyhow::Error> {
+    let mut offset = 0;
+    while chars.next().is_some() {
+        offset += 1;
+        if let Some((_, next_c)) = chars.peek() {
+            if !next_c.is_alphanumeric() && *next_c != '_' && *next_c != '-' {
+                break;
+            }
+        }
+    }
+    let ident = &input[last_i..last_i + offset];
+    let token = match ident {
+        "param" => Token::Param,
+        "cell" => Token::Cell,
+        x => Token::Ident(x),
+    };
+    tokens.push(token);
+    Ok(())
+}
 
 fn lex_comment<'a, I: Iterator<Item = State>>(
     input: &'a str,
@@ -171,7 +349,7 @@ cell cpu_cost:
 13.50
 -13.50
 - 13.50
-+13.50
++13.50 test
 + 13.50
         "#,
         [
@@ -184,7 +362,7 @@ cell cpu_cost:
             NumberLiteral("13.50"),
             NumberLiteral("-13.50"),
             Sub, NumberLiteral("13.50"),
-            NumberLiteral("13.50"),
+            NumberLiteral("+13.50"), Ident("test"),
             Add, NumberLiteral("13.50"),
         ]
     }
