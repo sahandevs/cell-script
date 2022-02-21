@@ -99,8 +99,6 @@ enum Sign {
     Unknown,
 }
 
-
-/// FIXME: this function consumes one extra character
 fn lex_number<'a, I: Iterator<Item = State>>(
     input: &'a str,
     tokens: &mut Vec<Token<'a>>,
@@ -113,13 +111,14 @@ fn lex_number<'a, I: Iterator<Item = State>>(
         number_str.push('-');
     }
     let mut offset = 0;
-    while let Some((_, c)) = chars.next() {
+    while let Some((_, c)) = chars.peek() {
         offset += 1;
-        number_str.push(c);
+        number_str.push(*c);
         let result: Result<f64, _> = number_str.parse();
         if result.is_err() {
             break;
         }
+        chars.next();
     }
     let ident = match sign {
         Sign::Positive | Sign::Negative => &input[last_i..last_i + offset],
@@ -243,6 +242,8 @@ fn lex_comment<'a, I: Iterator<Item = State>>(
 
 #[cfg(test)]
 mod tests {
+    use core::panic;
+
     use super::*;
     use Token::*;
 
@@ -331,9 +332,9 @@ cell cpu_cost:
         [
             StringLiteral("a"),
             StringLiteral("bbbb"),
-            StringLiteral("\n\nn"),
+            StringLiteral("\\n\\nn"),
             StringLiteral(""),
-            StringLiteral("t\tt"),
+            StringLiteral("t\\tt"),
         ]
     }
 
@@ -365,5 +366,17 @@ cell cpu_cost:
             NumberLiteral("+13.50"), Ident("test"),
             Add, NumberLiteral("13.50"),
         ]
+    }
+
+    #[test]
+    fn test_examples_lex_without_error() {
+        use std::fs;
+        for entry in fs::read_dir("./examples").unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_str().unwrap().ends_with(".cells") {
+                let content = std::fs::read_to_string(entry.path()).unwrap();
+                panic!("{:#?}", lex(&content).unwrap());
+            }
+        }
     }
 }
