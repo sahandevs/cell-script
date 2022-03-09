@@ -4,9 +4,9 @@ use anyhow::bail;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Token<'a> {
-    Param, // param
-    Cell,  // cell
-    Ident(&'a str),
+    Param,           // param
+    Cell,            // cell
+    Ident(&'a str),  //
     SemiColon,       // ;
     Colon,           // :
     Mul,             // *
@@ -45,7 +45,7 @@ pub fn scan<'a>(input: &'a str) -> Result<Vec<Token<'a>>, anyhow::Error> {
                 } else {
                     tokens.push(Token::Sub);
                 }
-            },
+            }
             '/' => tokens.push(Token::Div),
             '(' => tokens.push(Token::ParOpen),
             ')' => tokens.push(Token::ParClose),
@@ -222,29 +222,12 @@ mod tests {
 
     #[test]
     fn test_number() {
-        assert_eq!(
-            scan("123456").unwrap(),
-            vec![Number("123456"),]
-        );
-
-        assert_eq!(
-            scan("12.156").unwrap(),
-            vec![Number("12.156"),]
-        );
-
-        assert_eq!(
-            scan("-123").unwrap(),
-            vec![Number("-123"),]
-        );
-
-        assert_eq!(
-            scan("-123.123").unwrap(),
-            vec![Number("-123.123"),]
-        );
-
-        assert_eq!(
-            scan("- 123").unwrap(),
-            vec![Sub, Number("123"),]
-        );
+        assert_eq!(scan("123456").unwrap(), vec![Number("123456"),]);
+        assert_eq!(scan("12.156").unwrap(), vec![Number("12.156"),]);
+        assert_eq!(scan("-123").unwrap(), vec![Number("-123"),]);
+        assert_eq!(scan("-123.123").unwrap(), vec![Number("-123.123"),]);
+        assert_eq!(scan("- 123").unwrap(), vec![Sub, Number("123"),]);
+        assert_eq!(scan("- abc").unwrap(), vec![Sub, Ident("abc"),]);
+        // FIXME: assert_eq!(scan("-abc").unwrap(), vec![Sub, Ident("abc"),]);
     }
 }

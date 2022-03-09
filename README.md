@@ -68,3 +68,27 @@ cell total:
     }
 ]
 ```
+
+### Grammar
+
+```
+S: (Param | Cell)*
+
+Param: PARAM Ident SemiColon
+
+Cell: CELL Ident Colon Exp SemiColon
+
+Expr: 
+    | ParOpen Expr ParClose
+    | Expr Plus Expr
+    | Expr Sub Expr
+    | Expr Mul Expr
+    | Expr Div Expr
+    | Atom
+
+Atom:
+    | Number
+    | Ident
+   
+
+```
