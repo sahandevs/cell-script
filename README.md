@@ -36,36 +36,36 @@ cell total:
 
 ```json
 [
-    {
-        "input": {
-            "math_score": 10,
-            "physics_score": 15,
-            "data_structure_score": 15,
-        },
-        "output": {
-            "total": 105
-        }
+  {
+    "input": {
+      "math_score": 10,
+      "physics_score": 15,
+      "data_structure_score": 15
     },
-    {
-        "input": {
-            "math_score": 11,
-            "physics_score": 15,
-            "data_structure_score": 15,
-        },
-        "output": {
-            "total": 109
-        }
-    },
-    {
-        "input": {
-            "math_score": 11,
-            "physics_score": 15,
-            "data_structure_score": 15,
-        },
-        "output": {
-            "total": 113
-        }
+    "output": {
+      "total": 105
     }
+  },
+  {
+    "input": {
+      "math_score": 11,
+      "physics_score": 15,
+      "data_structure_score": 15
+    },
+    "output": {
+      "total": 109
+    }
+  },
+  {
+    "input": {
+      "math_score": 11,
+      "physics_score": 15,
+      "data_structure_score": 15
+    },
+    "output": {
+      "total": 113
+    }
+  }
 ]
 ```
 
@@ -78,7 +78,7 @@ Param: PARAM Ident SemiColon
 
 Cell: CELL Ident Colon Exp SemiColon
 
-Expr: 
+Expr:
     | ParOpen Expr ParClose
     | Expr Plus Expr
     | Expr Sub Expr
@@ -89,6 +89,15 @@ Expr:
 Atom:
     | Number
     | Ident
-   
 
 ```
+
+### Roadmap
+
+- [x] scanner
+- [x] parser
+- [ ] AST interpreter
+- [ ] detect cyclic dependency
+- [ ] Bytecode
+- [ ] ByteCode interpreter
+- [ ] Compiler / CodeGen (LLVM)
