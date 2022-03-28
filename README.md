@@ -98,6 +98,7 @@ Atom:
 - [x] parser
 - [ ] AST interpreter
 - [ ] detect cyclic dependency
+- [ ] cli
 - [ ] Bytecode
 - [ ] ByteCode interpreter
 - [ ] Compiler / CodeGen (LLVM)

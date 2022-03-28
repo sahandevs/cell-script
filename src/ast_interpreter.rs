@@ -19,6 +19,8 @@ cell b:
 
 */
 
+pub type Params = HashMap<String, f64>;
+
 #[derive(Debug)]
 pub enum CellResult<'a> {
     Pending(&'a Expr),
@@ -60,7 +62,7 @@ pub fn run_expr(expr: &Expr, context: &mut ExecutionContext) -> Result<f64, anyh
     }
 }
 
-pub fn run(code: &AST, cell_name: &str) -> Result<f64, anyhow::Error> {
+pub fn run(code: &AST, cell_name: &str, params: &Params) -> Result<f64, anyhow::Error> {
     let mut context = ExecutionContext::default();
     for node in &code.nodes {
         match node {
@@ -69,7 +71,14 @@ pub fn run(code: &AST, cell_name: &str) -> Result<f64, anyhow::Error> {
                     .cell_results
                     .insert(&cell.name, CellResult::Pending(&cell.expr));
             }
-            _ => {}
+            Node::Param(value) => {
+                let name = &value.name;
+                if let Some(value) = params.get(name) {
+                    context.cell_results.insert(name, CellResult::Done(*value));
+                } else {
+                    bail!("param `{}` not found", name);
+                }
+            }
         }
     }
     let cell = context.find_cell(cell_name)?;
@@ -89,7 +98,13 @@ mod tests {
     #[track_caller]
     fn test(code: &str, cell_name: &str) -> f64 {
         let ast = parser::parse(scanner::scan(code).unwrap()).unwrap();
-        run(&ast, cell_name).unwrap()
+        run(&ast, cell_name, &HashMap::new()).unwrap()
+    }
+
+    #[track_caller]
+    fn test_with_param(code: &str, cell_name: &str, params: &Params) -> f64 {
+        let ast = parser::parse(scanner::scan(code).unwrap()).unwrap();
+        run(&ast, cell_name, params).unwrap()
     }
 
     #[test]
@@ -142,6 +157,53 @@ mod tests {
                 "c"
             ),
             16f64
+        );
+    }
+
+    macro_rules! test_with_param {
+        ($code:expr, $cell_name:expr, { $(
+            $key:expr => $value: expr,
+        )* }) => {
+            {
+                let mut params = HashMap::new();
+                $(
+                    params.insert($key.to_owned(), $value);
+                )*
+                test_with_param($code, $cell_name, &params)
+            }
+        };
+    }
+
+    #[test]
+    fn test_param() {
+        assert_eq!(
+            test_with_param!(
+                r#"
+            param test;
+            cell a: test + 2;
+            "#,
+                "a",
+                {
+                    "test" => 5f64,
+                }
+            ),
+            7f64
+        );
+        assert_eq!(
+            test_with_param!(
+                r#"
+            param test1;
+            param test2;
+            cell a: test1 + 2;
+            cell b: test1 + test2 + a;
+            "#,
+                "b",
+                {
+                    "test1" => 2f64,
+                    "test2" => 3f64,
+                }
+            ),
+            9f64
         );
     }
 
