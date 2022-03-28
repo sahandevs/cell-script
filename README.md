@@ -96,8 +96,8 @@ Atom:
 
 - [x] scanner
 - [x] parser
-- [ ] AST interpreter
-- [ ] detect cyclic dependency
+- [x] AST interpreter
+- [x] detect cyclic dependency
 - [ ] cli
 - [ ] Bytecode
 - [ ] ByteCode interpreter

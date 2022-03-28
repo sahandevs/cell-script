@@ -20,6 +20,7 @@ cell b:
 */
 
 pub type Params = HashMap<String, f64>;
+pub type CallStack = Vec<String>;
 
 #[derive(Debug)]
 pub enum CellResult<'a> {
@@ -42,24 +43,44 @@ impl<'a> ExecutionContext<'a> {
     }
 }
 
-pub fn run_expr(expr: &Expr, context: &mut ExecutionContext) -> Result<f64, anyhow::Error> {
-    match expr {
+pub fn run_expr(
+    expr: &Expr,
+    context: &mut ExecutionContext,
+    call_stack: &mut CallStack,
+) -> Result<f64, anyhow::Error> {
+    let result = match expr {
         Expr::Atom(x) => match x {
             Number(x) => Ok(*x),
             Ident(cell_name) => {
+                if call_stack.iter().find(|x| *x == cell_name).is_some() {
+                    bail!("cyclic dependency found. {:?} -> {}", call_stack, cell_name)
+                }
                 let cell = context.find_cell(cell_name)?;
                 let result = match cell {
-                    CellResult::Pending(x) => run_expr(x, context)?,
+                    CellResult::Pending(x) => {
+                        call_stack.push(cell_name.clone());
+                        run_expr(x, context, call_stack)?
+                    }
                     CellResult::Done(x) => *x,
                 };
                 Ok(result)
             }
         },
-        Expr::Add(l, r) => Ok(run_expr(l, context)? + run_expr(r, context)?),
-        Expr::Sub(l, r) => Ok(run_expr(l, context)? - run_expr(r, context)?),
-        Expr::Mul(l, r) => Ok(run_expr(l, context)? * run_expr(r, context)?),
-        Expr::Div(l, r) => Ok(run_expr(l, context)? / run_expr(r, context)?),
-    }
+        Expr::Add(l, r) => {
+            Ok(run_expr(l, context, call_stack)? + run_expr(r, context, call_stack)?)
+        }
+        Expr::Sub(l, r) => {
+            Ok(run_expr(l, context, call_stack)? - run_expr(r, context, call_stack)?)
+        }
+        Expr::Mul(l, r) => {
+            Ok(run_expr(l, context, call_stack)? * run_expr(r, context, call_stack)?)
+        }
+        Expr::Div(l, r) => {
+            Ok(run_expr(l, context, call_stack)? / run_expr(r, context, call_stack)?)
+        }
+    };
+    call_stack.pop();
+    result
 }
 
 pub fn run(code: &AST, cell_name: &str, params: &Params) -> Result<f64, anyhow::Error> {
@@ -82,8 +103,10 @@ pub fn run(code: &AST, cell_name: &str, params: &Params) -> Result<f64, anyhow::
         }
     }
     let cell = context.find_cell(cell_name)?;
+    let mut call_stack = Vec::with_capacity(10);
+    call_stack.push(cell_name.to_owned());
     let result = match cell {
-        CellResult::Pending(x) => run_expr(x, &mut context)?,
+        CellResult::Pending(x) => run_expr(x, &mut context, &mut call_stack)?,
         CellResult::Done(x) => *x,
     };
     Ok(result)
@@ -99,6 +122,14 @@ mod tests {
     fn test(code: &str, cell_name: &str) -> f64 {
         let ast = parser::parse(scanner::scan(code).unwrap()).unwrap();
         run(&ast, cell_name, &HashMap::new()).unwrap()
+    }
+
+    #[track_caller]
+    fn test_expect_error(code: &str, cell_name: &str) {
+        let ast = parser::parse(scanner::scan(code).unwrap()).unwrap();
+        if let Ok(x) = run(&ast, cell_name, &HashMap::new()) {
+            panic!("expected error but got {}", x);
+        }
     }
 
     #[track_caller]
@@ -209,15 +240,20 @@ mod tests {
 
     #[test]
     fn test_cyclic() {
-        assert_eq!(
-            test(
-                r#"
-            cell a: b;
-            cell b: a;
-            "#,
-                "b"
-            ),
-            8f64
+        test_expect_error(
+            r#"
+        cell a: b;
+        cell b: a;
+        "#,
+            "b",
+        );
+        test_expect_error(
+            r#"
+        cell a: b;
+        cell b: c;
+        cell c: a;
+        "#,
+            "b",
         );
     }
 }
