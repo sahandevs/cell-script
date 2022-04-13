@@ -27,9 +27,9 @@ cell total:
 
 ```sh
 ./cell-script app.cell \
-   --param math_score="10,11,13" \
-   --param physics_score="15" \
-   --param data_structure_score="15" \
+   --param "math_score=10,11,13" \
+   --param "physics_score=15" \
+   --param "data_structure_score=15" \
    --query "total" \
    --format "json"
 ```

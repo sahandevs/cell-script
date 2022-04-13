@@ -1,0 +1,12 @@
+param p1;
+param p2;
+
+cell test:
+    a + p2 + c
+;
+
+cell a:
+    5 + c
+;
+
+cell c: p1 + 1;
