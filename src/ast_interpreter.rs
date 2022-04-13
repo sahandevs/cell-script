@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use anyhow::bail;
 
@@ -28,9 +28,19 @@ pub enum CellResult<'a> {
     Done(f64),
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ExecutionContext<'a> {
     pub cell_results: HashMap<&'a str, CellResult<'a>>,
+    pub call_stack: RefCell<CallStack>,
+}
+
+impl<'a> Default for ExecutionContext<'a> {
+    fn default() -> Self {
+        Self {
+            cell_results: Default::default(),
+            call_stack: Vec::with_capacity(10).into(),
+        }
+    }
 }
 
 impl<'a> ExecutionContext<'a> {
@@ -43,43 +53,41 @@ impl<'a> ExecutionContext<'a> {
     }
 }
 
-pub fn run_expr(
-    expr: &Expr,
-    context: &mut ExecutionContext,
-    call_stack: &mut CallStack,
-) -> Result<f64, anyhow::Error> {
+pub fn run_expr(expr: &Expr, context: &mut ExecutionContext) -> Result<f64, anyhow::Error> {
     let result = match expr {
         Expr::Atom(x) => match x {
             Number(x) => Ok(*x),
             Ident(cell_name) => {
-                if call_stack.iter().find(|x| *x == cell_name).is_some() {
-                    bail!("cyclic dependency found. {:?} -> {}", call_stack, cell_name)
+                if context
+                    .call_stack
+                    .try_borrow()?
+                    .iter()
+                    .find(|x| *x == cell_name)
+                    .is_some()
+                {
+                    bail!(
+                        "cyclic dependency found. {:?} -> {}",
+                        context.call_stack,
+                        cell_name
+                    )
                 }
                 let cell = context.find_cell(cell_name)?;
                 let result = match cell {
                     CellResult::Pending(x) => {
-                        call_stack.push(cell_name.clone());
-                        run_expr(x, context, call_stack)?
+                        context.call_stack.try_borrow_mut()?.push(cell_name.clone());
+                        run_expr(x, context)?
                     }
                     CellResult::Done(x) => *x,
                 };
                 Ok(result)
             }
         },
-        Expr::Add(l, r) => {
-            Ok(run_expr(l, context, call_stack)? + run_expr(r, context, call_stack)?)
-        }
-        Expr::Sub(l, r) => {
-            Ok(run_expr(l, context, call_stack)? - run_expr(r, context, call_stack)?)
-        }
-        Expr::Mul(l, r) => {
-            Ok(run_expr(l, context, call_stack)? * run_expr(r, context, call_stack)?)
-        }
-        Expr::Div(l, r) => {
-            Ok(run_expr(l, context, call_stack)? / run_expr(r, context, call_stack)?)
-        }
+        Expr::Add(l, r) => Ok(run_expr(l, context)? + run_expr(r, context)?),
+        Expr::Sub(l, r) => Ok(run_expr(l, context)? - run_expr(r, context)?),
+        Expr::Mul(l, r) => Ok(run_expr(l, context)? * run_expr(r, context)?),
+        Expr::Div(l, r) => Ok(run_expr(l, context)? / run_expr(r, context)?),
     };
-    call_stack.pop();
+    context.call_stack.try_borrow_mut()?.pop();
     result
 }
 
@@ -103,10 +111,13 @@ pub fn run(code: &AST, cell_name: &str, params: &Params) -> Result<f64, anyhow::
         }
     }
     let cell = context.find_cell(cell_name)?;
-    let mut call_stack = Vec::with_capacity(10);
-    call_stack.push(cell_name.to_owned());
+    context
+        .call_stack
+        .try_borrow_mut()?
+        .push(cell_name.to_owned());
+
     let result = match cell {
-        CellResult::Pending(x) => run_expr(x, &mut context, &mut call_stack)?,
+        CellResult::Pending(x) => run_expr(x, &mut context)?,
         CellResult::Done(x) => *x,
     };
     Ok(result)
