@@ -1,9 +1,10 @@
+use crate::{ast_interpreter, parser::parse, scanner::scan};
 use anyhow::bail;
 use clap::Parser;
+use itertools::Itertools;
+use rayon::prelude::*;
 use serde_json;
 use std::{collections::HashMap, fmt::Display, path::PathBuf, str::FromStr};
-
-use crate::{ast_interpreter, parser::parse, scanner::scan};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -61,28 +62,56 @@ pub fn run() -> Result<(), anyhow::Error> {
     };
 
     // build params
-    let mut params = HashMap::new();
+    let mut param_names = Vec::new();
+    let mut params_values = Vec::new();
     for param in &args.param {
         if let Some((name, values_str)) = param.split_once('=') {
-            let value: f64 = values_str.trim().parse()?;
-            params.insert(name.to_owned(), value);
+            let mut values = vec![];
+            for value in values_str.split(",") {
+                let value: f64 = value.parse()?;
+                values.push(value);
+            }
+            params_values.push(values);
+            param_names.push(name.to_string());
         } else {
             bail!("invalid param. usage --param \"name=1\"")
         }
     }
 
-    let result = ast_interpreter::run(&ast, &args.query, &params)?;
+    let permutations: Vec<_> = params_values
+        .into_iter()
+        .multi_cartesian_product()
+        .par_bridge()
+        .collect();
+    let param_len = param_names.len();
+    let outputs: Vec<_> = permutations
+        .into_iter()
+        .par_bridge()
+        .flat_map(|permutation| {
+            let mut input = HashMap::with_capacity(param_len);
+            for (name, value) in param_names.iter().zip(permutation.iter()) {
+                input.insert(name.to_string(), *value);
+            }
+            let result = ast_interpreter::run(&ast, &args.query, &input).ok()?;
+            let output = Output {
+                input,
+                output: result,
+            };
+            Some(output)
+        })
+        .collect();
 
     match args.format {
         OutputFormat::Text => {
-            println!("{:?} {:?} = {}", args.param, args.code_path, result);
+            for output in outputs.into_iter() {
+                println!(
+                    "{:?}({:?}) = {}",
+                    args.code_path, output.input, output.output
+                );
+            }
         }
         OutputFormat::Json => {
-            let output = Output {
-                input: params,
-                output: result,
-            };
-            let output = serde_json::to_string_pretty(&output)?;
+            let output = serde_json::to_string_pretty(&outputs)?;
             println!("{}", output);
         }
     }

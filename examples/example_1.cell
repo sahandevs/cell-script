@@ -2,7 +2,7 @@ param p1;
 param p2;
 
 cell test:
-    a + p2 + c
+    p1 + p2 * p2 + a * p1 / (p2 + 1)
 ;
 
 cell a:
