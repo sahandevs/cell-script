@@ -48,7 +48,7 @@ impl FromStr for OutputFormat {
 #[derive(Debug, serde::Serialize)]
 struct Output {
     input: HashMap<String, f64>,
-    output: f64,
+    output: HashMap<String, f64>,
 }
 
 pub fn run() -> Result<(), anyhow::Error> {
@@ -84,6 +84,7 @@ pub fn run() -> Result<(), anyhow::Error> {
         .par_bridge()
         .collect();
     let param_len = param_names.len();
+    let cell_names: Vec<_> = args.query.split(',').collect();
     let outputs: Vec<_> = permutations
         .into_iter()
         .par_bridge()
@@ -92,10 +93,10 @@ pub fn run() -> Result<(), anyhow::Error> {
             for (name, value) in param_names.iter().zip(permutation.iter()) {
                 input.insert(name.to_string(), *value);
             }
-            let result = ast_interpreter::run(&ast, &args.query, &input).ok()?;
+            let result = ast_interpreter::run(&ast, cell_names.as_slice(), &input).ok()?;
             let output = Output {
                 input,
-                output: result,
+                output: HashMap::from_iter(result),
             };
             Some(output)
         })
@@ -105,7 +106,7 @@ pub fn run() -> Result<(), anyhow::Error> {
         OutputFormat::Text => {
             for output in outputs.into_iter() {
                 println!(
-                    "{:?}({:?}) = {}",
+                    "{:?}({:?}) = {:?}",
                     args.code_path, output.input, output.output
                 );
             }

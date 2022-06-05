@@ -12,6 +12,7 @@ pub enum Token<'a> {
     SemiColon,       // ;
     Colon,           // :
     Mul,             // *
+    Mod,             // %
     Add,             // +
     Sub,             // -
     Div,             // /
@@ -42,6 +43,7 @@ pub fn scan<'a>(input: &'a str) -> Result<Vec<Token<'a>>, anyhow::Error> {
             ',' => tokens.push(Token::Comma),
             '?' => tokens.push(Token::QMark),
             ';' => tokens.push(Token::SemiColon),
+            '%' => tokens.push(Token::Mod),
             ':' => tokens.push(Token::Colon),
             '+' => tokens.push(Token::Add),
             '*' => tokens.push(Token::Mul),

@@ -1,0 +1,14 @@
+param studentnumber;
+cell f: 
+  if studentnumber % 2 == 0
+    ? studentnumber / 2
+    : studentnumber / 3;
+
+cell F: ( rand() * 22 ) + 3;
+
+cell t: int( rand() * 10 );
+
+cell m: ( rand() * 4.5 ) + 0.5;
+
+cell V: (f / t ) - ((f/(2*m) * t));
+

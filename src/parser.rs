@@ -27,24 +27,42 @@ pub struct Cell {
 }
 
 #[derive(PartialEq, Debug)]
+pub enum Operator {
+    Equals,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+}
+
+#[derive(PartialEq, Debug)]
 pub enum Expr {
     Atom(Atom),
     Add(Box<Expr>, Box<Expr>),
+    Mod(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
     Div(Box<Expr>, Box<Expr>),
+    Condition {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        op: Operator,
+        true_branch: Box<Expr>,
+        false_branch: Box<Expr>,
+    },
 }
 
 #[derive(PartialEq, Debug)]
 pub enum Atom {
     Number(f64),
     Ident(String),
+    Call { name: String, arguments: Vec<Expr> },
 }
 
 impl<'a> Token<'a> {
     fn is_operator(&self) -> bool {
         match self {
-            Token::Mul | Token::Add | Token::Sub | Token::Div => true,
+            Token::Mul | Token::Add | Token::Sub | Token::Div | Token::Mod => true,
             _ => false,
         }
     }
@@ -56,7 +74,33 @@ fn parse_atom<'a, T: Iterator<Item = Token<'a>>>(
     let token = tokens
         .next()
         .ok_or_else(|| anyhow::Error::msg("[8] expected a token"))?;
+    let next_token = tokens.peek();
     match token {
+        Token::Ident(x) if matches!(next_token, Some(Token::ParOpen)) => {
+            let fn_name = x;
+            // skip para
+            tokens.next();
+            let mut args = vec![];
+            while let Ok(expr) = parse_expr(tokens) {
+                args.push(expr);
+                let next_token = tokens.peek();
+                match next_token {
+                    Some(Token::ParClose) => {
+                        tokens.next();
+                        break;
+                    }
+                    Some(Token::Comma) => {
+                        tokens.next();
+                        continue;
+                    }
+                    x => bail!("invalid token {:?}", x),
+                }
+            }
+            Ok(Atom::Call {
+                name: fn_name.to_string(),
+                arguments: args,
+            })
+        }
         Token::Ident(x) => Ok(Atom::Ident(x.to_string())),
         Token::Number(x) => {
             let number: f64 = x.parse()?;
@@ -64,6 +108,43 @@ fn parse_atom<'a, T: Iterator<Item = Token<'a>>>(
         }
         x => bail!("[7] unexpected token {:?}", x),
     }
+}
+
+fn parse_cond<'a, T: Iterator<Item = Token<'a>>>(
+    tokens: &mut Peekable<T>,
+) -> Result<Expr, anyhow::Error> {
+    // skip if
+    tokens.next();
+    // expr
+    let lhs = Box::new(parse_expr(tokens)?);
+    // op
+    let op = match tokens.next() {
+        Some(Token::Greater) => Operator::Greater,
+        Some(Token::GreaterEqual) => Operator::GreaterEqual,
+        Some(Token::Less) => Operator::Less,
+        Some(Token::LessEqual) => Operator::LessEqual,
+        Some(Token::Equal) => Operator::Equals,
+        x => bail!("unexpected token {:?}", x),
+    };
+    // expr
+    let rhs = Box::new(parse_expr(tokens)?);
+    let token = tokens.next();
+    if !matches!(token, Some(Token::QMark)) {
+        bail!("expected ? found {:?}", token);
+    }
+    let true_branch = Box::new(parse_expr(tokens)?);
+    let token = tokens.next();
+    if !matches!(token, Some(Token::Colon)) {
+        bail!("expected : found {:?}", token);
+    }
+    let false_branch = Box::new(parse_expr(tokens)?);
+    return Ok(Expr::Condition {
+        lhs,
+        rhs,
+        op,
+        true_branch,
+        false_branch,
+    });
 }
 
 fn parse_expr<'a, T: Iterator<Item = Token<'a>>>(
@@ -83,6 +164,10 @@ fn parse_expr<'a, T: Iterator<Item = Token<'a>>>(
                     x => bail!("[5] unexpected token {:?}", x),
                 }
             }
+            Token::If => {
+                let cond = parse_cond(tokens)?;
+                cond
+            }
             _ => {
                 let atom = parse_atom(tokens)?;
                 Expr::Atom(atom)
@@ -100,6 +185,7 @@ fn parse_expr<'a, T: Iterator<Item = Token<'a>>>(
                 Token::Add => Expr::Add(Box::new(lhs_expr), Box::new(rhs_expr)),
                 Token::Sub => Expr::Sub(Box::new(lhs_expr), Box::new(rhs_expr)),
                 Token::Div => Expr::Div(Box::new(lhs_expr), Box::new(rhs_expr)),
+                Token::Mod => Expr::Mod(Box::new(lhs_expr), Box::new(rhs_expr)),
                 _ => bail!("unreachable!"),
             })
         } else {
@@ -174,6 +260,22 @@ mod tests {
         assert_eq!(
             parse("param test; param test2;"),
             "AST { nodes: [Param(Param { name: \"test\" }), Param(Param { name: \"test2\" })] }"
+        );
+    }
+
+    #[test]
+    fn test_func() {
+        assert_eq!(
+            parse("cell test: random();"),
+            "AST { nodes: [Cell(Cell { name: \"test\", expr: Atom(Call { name: \"random\", arguments: [] }) })] }"
+        );
+        assert_eq!(
+            parse("cell test: random(1);"),
+            "AST { nodes: [Cell(Cell { name: \"test\", expr: Atom(Call { name: \"random\", arguments: [Atom(Number(1.0))] }) })] }"
+        );
+        assert_eq!(
+            parse("cell test: random(1, 2, 3) + 1;"),
+            "AST { nodes: [Cell(Cell { name: \"test\", expr: Add(Atom(Call { name: \"random\", arguments: [Atom(Number(1.0)), Atom(Number(2.0)), Atom(Number(3.0))] }), Atom(Number(1.0))) })] }"
         );
     }
 
