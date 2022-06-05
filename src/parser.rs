@@ -1,234 +1,303 @@
+use std::iter::Peekable;
+
 use anyhow::bail;
 
-use crate::lexer::{self, Token};
+use crate::scanner::Token;
 
-#[derive(Debug)]
-pub enum Expression {
-    Ref(String),
-    Add(Box<Expression>, Box<Expression>),
-    Mul(Box<Expression>, Box<Expression>),
-    Div(Box<Expression>, Box<Expression>),
-    Sub(Box<Expression>, Box<Expression>),
-    GreaterThan(Box<Expression>, Box<Expression>),
-    GreaterThanOrEqual(Box<Expression>, Box<Expression>),
-    LessThan(Box<Expression>, Box<Expression>),
-    LessThanOrEqual(Box<Expression>, Box<Expression>),
-    Equal(Box<Expression>, Box<Expression>),
-    If {
-        cond: Box<Expression>,
-        true_branch: Box<Expression>,
-        false_branch: Box<Expression>,
-    },
-    NumberLiteral(f64),
-    StringLiteral(String),
+#[derive(PartialEq, Debug, Default)]
+pub struct AST {
+    pub nodes: Vec<Node>,
 }
 
-pub struct Param {
-    pub name: String,
-    pub default_value: Option<Expression>,
-}
-
-pub struct Cell {
-    pub name: String,
-    pub body: Expression,
-}
+#[derive(PartialEq, Debug)]
 pub enum Node {
     Param(Param),
     Cell(Cell),
 }
 
-pub struct AST {
-    pub nodes: Vec<Node>,
+#[derive(PartialEq, Debug)]
+pub struct Param {
+    pub name: String,
 }
 
-pub fn parse_expression(tokens: &[&lexer::Token]) -> Result<(usize, Expression), anyhow::Error> {
-    match &tokens[..] {
-        [Token::ParOpen, rest @ ..] => {
-            let (skip, expression) = parse_expression(rest)?;
-            if let Some(Token::ParClose) = tokens.get(skip) {
-                Ok((skip + 2, expression))
-            } else {
-                bail!("closing parenthesis not found for the expression group")
-            }
+#[derive(PartialEq, Debug)]
+pub struct Cell {
+    pub name: String,
+    pub expr: Expr,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Operator {
+    Equals,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Expr {
+    Atom(Atom),
+    Add(Box<Expr>, Box<Expr>),
+    Mod(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Condition {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        op: Operator,
+        true_branch: Box<Expr>,
+        false_branch: Box<Expr>,
+    },
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Atom {
+    Number(f64),
+    Ident(String),
+    Call { name: String, arguments: Vec<Expr> },
+}
+
+impl<'a> Token<'a> {
+    fn is_operator(&self) -> bool {
+        match self {
+            Token::Mul | Token::Add | Token::Sub | Token::Div | Token::Mod => true,
+            _ => false,
         }
-        [left, op, right, ..] => {
-            let (_, left) = parse_expression(&[left])?;
-            let (_, right) = parse_expression(&[right])?;
-            let (left, right) = (Box::new(left), Box::new(right));
-            let expr = match op {
-                Token::Mul => Expression::Mul(left, right),
-                Token::Div => Expression::Div(left, right),
-                Token::Sub => Expression::Sub(left, right),
-                Token::Add => Expression::Add(left, right),
-                _ => bail!("invalid expression {:?}", &tokens),
-            };
-            Ok((3, expr))
-        }
-        [Token::NumberLiteral(x), ..] => Ok((1, Expression::NumberLiteral(x.parse()?))),
-        [Token::StringLiteral(x), ..] => Ok((1, Expression::StringLiteral(x.to_string()))),
-        x => bail!("invalid expression {:?}", x),
     }
 }
 
-pub fn parse(tokens: &[lexer::Token]) -> Result<AST, anyhow::Error> {
-    let tokens: Vec<_> = tokens
-        .iter()
-        .filter(|x| !matches!(x, Token::Comment(_)))
-        .collect();
-    let mut nodes = vec![];
-    let mut skip = 0;
-    loop {
-        match &tokens[skip..] {
-            [Token::Param, Token::Ident(name), Token::SemiColon, ..] => {
-                nodes.push(Node::Param(Param {
-                    name: name.to_string(),
-                    default_value: None,
-                }));
-                skip += 3;
-            }
-            [Token::Param, Token::Ident(name), Token::Colon, rest @ ..] => {
-                let (x, expression) = parse_expression(rest)?;
-                nodes.push(Node::Param(Param {
-                    name: name.to_string(),
-                    default_value: Some(expression),
-                }));
-                skip += 3 + x;
-                if let Some(Token::SemiColon) = tokens.get(skip) {
-                    skip += 1;
-                } else {
-                    bail!("expected semicolon")
+fn parse_atom<'a, T: Iterator<Item = Token<'a>>>(
+    tokens: &mut Peekable<T>,
+) -> Result<Atom, anyhow::Error> {
+    let token = tokens
+        .next()
+        .ok_or_else(|| anyhow::Error::msg("[8] expected a token"))?;
+    let next_token = tokens.peek();
+    match token {
+        Token::Ident(x) if matches!(next_token, Some(Token::ParOpen)) => {
+            let fn_name = x;
+            // skip para
+            tokens.next();
+            let mut args = vec![];
+            while let Ok(expr) = parse_expr(tokens) {
+                args.push(expr);
+                let next_token = tokens.peek();
+                match next_token {
+                    Some(Token::ParClose) => {
+                        tokens.next();
+                        break;
+                    }
+                    Some(Token::Comma) => {
+                        tokens.next();
+                        continue;
+                    }
+                    x => bail!("invalid token {:?}", x),
                 }
             }
-            [] => break,
-            x => bail!("invalid syntax {:?}", x),
+            Ok(Atom::Call {
+                name: fn_name.to_string(),
+                arguments: args,
+            })
+        }
+        Token::Ident(x) => Ok(Atom::Ident(x.to_string())),
+        Token::Number(x) => {
+            let number: f64 = x.parse()?;
+            Ok(Atom::Number(number))
+        }
+        x => bail!("[7] unexpected token {:?}", x),
+    }
+}
+
+fn parse_cond<'a, T: Iterator<Item = Token<'a>>>(
+    tokens: &mut Peekable<T>,
+) -> Result<Expr, anyhow::Error> {
+    // skip if
+    tokens.next();
+    // expr
+    let lhs = Box::new(parse_expr(tokens)?);
+    // op
+    let op = match tokens.next() {
+        Some(Token::Greater) => Operator::Greater,
+        Some(Token::GreaterEqual) => Operator::GreaterEqual,
+        Some(Token::Less) => Operator::Less,
+        Some(Token::LessEqual) => Operator::LessEqual,
+        Some(Token::Equal) => Operator::Equals,
+        x => bail!("unexpected token {:?}", x),
+    };
+    // expr
+    let rhs = Box::new(parse_expr(tokens)?);
+    let token = tokens.next();
+    if !matches!(token, Some(Token::QMark)) {
+        bail!("expected ? found {:?}", token);
+    }
+    let true_branch = Box::new(parse_expr(tokens)?);
+    let token = tokens.next();
+    if !matches!(token, Some(Token::Colon)) {
+        bail!("expected : found {:?}", token);
+    }
+    let false_branch = Box::new(parse_expr(tokens)?);
+    return Ok(Expr::Condition {
+        lhs,
+        rhs,
+        op,
+        true_branch,
+        false_branch,
+    });
+}
+
+fn parse_expr<'a, T: Iterator<Item = Token<'a>>>(
+    tokens: &mut Peekable<T>,
+) -> Result<Expr, anyhow::Error> {
+    let first = tokens
+        .peek()
+        .ok_or_else(|| anyhow::Error::msg("[6] expected a token"))?;
+
+    let lhs_expr = {
+        match first {
+            Token::ParOpen => {
+                tokens.next();
+                let expr = parse_expr(tokens)?;
+                match tokens.next() {
+                    Some(Token::ParClose) => expr,
+                    x => bail!("[5] unexpected token {:?}", x),
+                }
+            }
+            Token::If => {
+                let cond = parse_cond(tokens)?;
+                cond
+            }
+            _ => {
+                let atom = parse_atom(tokens)?;
+                Expr::Atom(atom)
+            }
+        }
+    };
+
+    if let Some(next) = tokens.peek() {
+        if next.is_operator() {
+            // SAFETY: we already checked with `peek`
+            let next = tokens.next().unwrap();
+            let rhs_expr = parse_expr(tokens)?;
+            Ok(match next {
+                Token::Mul => Expr::Mul(Box::new(lhs_expr), Box::new(rhs_expr)),
+                Token::Add => Expr::Add(Box::new(lhs_expr), Box::new(rhs_expr)),
+                Token::Sub => Expr::Sub(Box::new(lhs_expr), Box::new(rhs_expr)),
+                Token::Div => Expr::Div(Box::new(lhs_expr), Box::new(rhs_expr)),
+                Token::Mod => Expr::Mod(Box::new(lhs_expr), Box::new(rhs_expr)),
+                _ => bail!("unreachable!"),
+            })
+        } else {
+            Ok(lhs_expr)
+        }
+    } else {
+        Ok(lhs_expr)
+    }
+}
+
+fn parse_cell<'a, T: Iterator<Item = Token<'a>>>(
+    tokens: &mut Peekable<T>,
+) -> Result<Cell, anyhow::Error> {
+    let name = match (tokens.next(), tokens.next()) {
+        (Some(Token::Ident(name)), Some(Token::Colon)) => name,
+        x => bail!("[4] unexpected token: {:?}", x),
+    };
+    let expr = parse_expr(tokens)?;
+    match tokens.next() {
+        Some(Token::SemiColon) => Ok(Cell {
+            name: name.to_string(),
+            expr,
+        }),
+        x => bail!("[3] unexpected token: {:?}", x),
+    }
+}
+
+fn parse_param<'a, T: Iterator<Item = Token<'a>>>(
+    tokens: &mut Peekable<T>,
+) -> Result<Param, anyhow::Error> {
+    match (tokens.next(), tokens.next()) {
+        (Some(Token::Ident(name)), Some(Token::SemiColon)) => Ok(Param {
+            name: name.to_string(),
+        }),
+        x => bail!("[2] unexpected token: {:?}", x),
+    }
+}
+
+pub fn parse(tokens: Vec<Token>) -> Result<AST, anyhow::Error> {
+    let mut ast = AST::default();
+    let mut tokens = tokens.into_iter().peekable();
+
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Param => {
+                ast.nodes.push(Node::Param(parse_param(&mut tokens)?));
+            }
+            Token::Cell => {
+                ast.nodes.push(Node::Cell(parse_cell(&mut tokens)?));
+            }
+            x => bail!("[1] unexpected token {:?}, expected 'param' or 'cell'", x),
         }
     }
 
-    Ok(AST { nodes })
+    Ok(ast)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::lexer::lex;
-
-    fn parse_input(input: &str) -> AST {
-        let tokens = lex(input).unwrap();
-        let ast = parse(&tokens).unwrap();
-        ast
-    }
-
-    fn assert_parse_fails(input: &str) {
-        let tokens = lex(input).unwrap();
-        assert!(parse(&tokens).is_err());
+    use crate::scanner;
+    fn parse(input: &str) -> String {
+        let tokens = scanner::scan(input).unwrap();
+        format!("{:?}", super::parse(tokens).unwrap())
     }
 
     #[test]
-    fn parse_param_with_no_default() {
-        let result = parse_input("param hello;");
-        assert_eq!(result.nodes.len(), 1);
-        let param = match &result.nodes[0] {
-            Node::Param(x) => x,
-            _ => panic!("expected param"),
-        };
-        assert_eq!(param.name, "hello");
-    }
-
-    #[test]
-    fn parse_param_with_default_number() {
-        let result = parse_input("param hello: 1;");
-        assert_eq!(result.nodes.len(), 1);
-        let param = match &result.nodes[0] {
-            Node::Param(x) => x,
-            _ => panic!("expected param"),
-        };
-        assert_eq!(param.name, "hello");
-        let default = &param.default_value;
-        match default {
-            Some(Expression::NumberLiteral(x)) if *x == 1.0 => {}
-            x => panic!("invalid expression {:?}", x),
-        };
-    }
-
-    #[test]
-    fn parse_param_with_simple_expression() {
-        let result = parse_input("param hello: 1 + 5;");
-        assert_eq!(result.nodes.len(), 1);
-        let param = match &result.nodes[0] {
-            Node::Param(x) => x,
-            _ => panic!("expected param"),
-        };
-        assert_eq!(param.name, "hello");
-        let default = &param.default_value;
-        match default {
-            Some(Expression::Add(left, right)) => {
-                if let Expression::NumberLiteral(left) = **left {
-                    assert_eq!(left, 1.0);
-                } else {
-                    panic!("expected number")
-                }
-                if let Expression::NumberLiteral(right) = **right {
-                    assert_eq!(right, 5.0);
-                } else {
-                    panic!("expected number")
-                }
-            }
-            x => panic!("invalid expression {:?}", x),
-        };
-    }
-
-    #[test]
-    fn parse_param_with_default_string() {
-        let result = parse_input("param hello: \"test\";");
-        assert_eq!(result.nodes.len(), 1);
-        let param = match &result.nodes[0] {
-            Node::Param(x) => x,
-            _ => panic!("expected param"),
-        };
-        assert_eq!(param.name, "hello");
-        let default = &param.default_value;
-        match default {
-            Some(Expression::StringLiteral(x)) if *x == "test" => {}
-            x => panic!("invalid expression {:?}", x),
-        };
-    }
-
-    #[test]
-    fn parse_multi_node_param() {
-        let result = parse_input(
-            r#"
-        param hello: "test";
-        param test2: 1;
-        param hi: "test2";
-        "#,
+    fn test_param() {
+        assert_eq!(
+            parse("param test;"),
+            "AST { nodes: [Param(Param { name: \"test\" })] }"
         );
-        assert_eq!(result.nodes.len(), 3);
-        let (param1, param2, param3) = match &result.nodes[..] {
-            [Node::Param(a), Node::Param(b), Node::Param(c)] => (a, b, c),
-            _ => panic!("expected param"),
-        };
-        assert_eq!(param1.name, "hello");
-        let default = &param1.default_value;
-        match default {
-            Some(Expression::StringLiteral(x)) if *x == "test" => {}
-            x => panic!("invalid expression {:?}", x),
-        };
-        assert_eq!(param2.name, "test2");
-        let default = &param2.default_value;
-        match default {
-            Some(Expression::NumberLiteral(x)) if *x == 1.0 => {}
-            x => panic!("invalid expression {:?}", x),
-        };
-        assert_eq!(param3.name, "hi");
-        let default = &param3.default_value;
-        match default {
-            Some(Expression::StringLiteral(x)) if *x == "test2" => {}
-            x => panic!("invalid expression {:?}", x),
-        };
+        assert_eq!(
+            parse("param test; param test2;"),
+            "AST { nodes: [Param(Param { name: \"test\" }), Param(Param { name: \"test2\" })] }"
+        );
     }
 
     #[test]
-    fn parse_param_errors() {
-        assert_parse_fails("param hello: 1");
+    fn test_func() {
+        assert_eq!(
+            parse("cell test: random();"),
+            "AST { nodes: [Cell(Cell { name: \"test\", expr: Atom(Call { name: \"random\", arguments: [] }) })] }"
+        );
+        assert_eq!(
+            parse("cell test: random(1);"),
+            "AST { nodes: [Cell(Cell { name: \"test\", expr: Atom(Call { name: \"random\", arguments: [Atom(Number(1.0))] }) })] }"
+        );
+        assert_eq!(
+            parse("cell test: random(1, 2, 3) + 1;"),
+            "AST { nodes: [Cell(Cell { name: \"test\", expr: Add(Atom(Call { name: \"random\", arguments: [Atom(Number(1.0)), Atom(Number(2.0)), Atom(Number(3.0))] }), Atom(Number(1.0))) })] }"
+        );
+    }
+
+    #[test]
+    fn test_cell() {
+        assert_eq!(
+            parse(r#"cell test2: 1;"#),
+            "AST { nodes: [Cell(Cell { name: \"test2\", expr: Atom(Number(1.0)) })] }"
+        );
+        assert_eq!(
+            parse(
+                r#"
+        cell test: 1;
+        cell test2: 1 + 2;
+        "#
+            ),
+            "AST { nodes: [Cell(Cell { name: \"test\", expr: Atom(Number(1.0)) }), Cell(Cell { name: \"test2\", expr: Add(Atom(Number(1.0)), Atom(Number(2.0))) })] }"
+        );
+        assert_eq!(parse(r#"cell test2: (1 + 2) + 3;"#), "AST { nodes: [Cell(Cell { name: \"test2\", expr: Add(Add(Atom(Number(1.0)), Atom(Number(2.0))), Atom(Number(3.0))) })] }");
+        assert_eq!(parse(r#"cell test2: (1 / abc) + 3;"#), "AST { nodes: [Cell(Cell { name: \"test2\", expr: Add(Div(Atom(Number(1.0)), Atom(Ident(\"abc\"))), Atom(Number(3.0))) })] }");
+        assert_eq!(parse(r#"cell test2: (1 + abc) - 3;"#), "AST { nodes: [Cell(Cell { name: \"test2\", expr: Sub(Add(Atom(Number(1.0)), Atom(Ident(\"abc\"))), Atom(Number(3.0))) })] }");
+        assert_eq!(parse(r#"cell test2: (1 * abc) - 3;"#), "AST { nodes: [Cell(Cell { name: \"test2\", expr: Sub(Mul(Atom(Number(1.0)), Atom(Ident(\"abc\"))), Atom(Number(3.0))) })] }");
+        assert_eq!(parse(r#"cell test2: (-1 * (abc)) - 3;"#), "AST { nodes: [Cell(Cell { name: \"test2\", expr: Sub(Mul(Atom(Number(-1.0)), Atom(Ident(\"abc\"))), Atom(Number(3.0))) })] }");
     }
 }

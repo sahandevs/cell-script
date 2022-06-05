@@ -1,0 +1,12 @@
+param p1;
+param p2;
+
+cell test:
+    p1 + p2 * p2 + a * p1 / (p2 + 1)
+;
+
+cell a:
+    5 + c
+;
+
+cell c: p1 + 1;
