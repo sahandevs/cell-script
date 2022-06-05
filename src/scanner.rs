@@ -7,6 +7,8 @@ pub enum Token<'a> {
     Param,           // param
     Cell,            // cell
     Ident(&'a str),  //
+    If,              // if
+    QMark,           // ?
     SemiColon,       // ;
     Colon,           // :
     Mul,             // *
@@ -16,6 +18,12 @@ pub enum Token<'a> {
     Number(&'a str), // 1, 1.0, -1
     ParOpen,         // (
     ParClose,        // )
+    Comma,           // ,
+    Greater,         // >
+    GreaterEqual,    // >=
+    Less,            // <
+    LessEqual,       // <=
+    Equal,           // ==
 }
 
 pub fn scan<'a>(input: &'a str) -> Result<Vec<Token<'a>>, anyhow::Error> {
@@ -31,10 +39,26 @@ pub fn scan<'a>(input: &'a str) -> Result<Vec<Token<'a>>, anyhow::Error> {
                     }
                 }
             }
+            ',' => tokens.push(Token::Comma),
+            '?' => tokens.push(Token::QMark),
             ';' => tokens.push(Token::SemiColon),
             ':' => tokens.push(Token::Colon),
             '+' => tokens.push(Token::Add),
             '*' => tokens.push(Token::Mul),
+            '>' if matches!(chars.peek(), Some((_, '='))) => {
+                chars.next();
+                tokens.push(Token::GreaterEqual);
+            }
+            '>' => tokens.push(Token::Greater),
+            '<' if matches!(chars.peek(), Some((_, '='))) => {
+                chars.next();
+                tokens.push(Token::LessEqual)
+            }
+            '<' => tokens.push(Token::Less),
+            '=' if matches!(chars.peek(), Some((_, '='))) => {
+                chars.next();
+                tokens.push(Token::Equal);
+            }
             '-' => {
                 if let Some((_, next_c)) = chars.peek() {
                     if next_c.is_numeric() {
@@ -116,6 +140,7 @@ fn scan_ident<'a, T: Iterator<Item = (usize, char)>>(
     let token = match ident {
         "param" => Token::Param,
         "cell" => Token::Cell,
+        "if" => Token::If,
         x => Token::Ident(x),
     };
     Ok(token)
@@ -147,6 +172,10 @@ mod tests {
             cell total:
                1 + 1.0
             ;
+            cell test:
+                if math(1, 2) >= 123
+                  ? 2
+                  : 3;
             "#
             )
             .unwrap(),
@@ -157,6 +186,23 @@ mod tests {
                 Number("1"),
                 Add,
                 Number("1.0"),
+                SemiColon,
+                Cell,
+                Ident("test"),
+                Colon,
+                If,
+                Ident("math"),
+                ParOpen,
+                Number("1"),
+                Comma,
+                Number("2"),
+                ParClose,
+                GreaterEqual,
+                Number("123"),
+                QMark,
+                Number("2"),
+                Colon,
+                Number("3"),
                 SemiColon,
             ]
         );
