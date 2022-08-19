@@ -52,6 +52,69 @@ pub enum Expr {
     },
 }
 
+impl AST {
+    pub fn find_node(&self, name: &str) -> Option<&Node> {
+        self.nodes.iter().find(|x| match x {
+            Node::Param(x) => x.name == name,
+            Node::Cell(x) => x.name == name,
+        })
+    }
+}
+
+impl Expr {
+    pub fn name_uses(&self) -> Vec<&str> {
+        let mut r = Vec::new();
+        match self {
+            Expr::Atom(Atom::Ident(x)) => {
+                r.push(x.as_str());
+            }
+            Expr::Atom(Atom::Call { name: _, arguments }) => {
+                r.extend(arguments.iter().map(|x| x.name_uses()).flatten());
+            }
+            Expr::Add(a, b) => {
+                r.extend(a.name_uses());
+                r.extend(b.name_uses());
+            }
+            Expr::Mod(a, b) => {
+                r.extend(a.name_uses());
+                r.extend(b.name_uses());
+            }
+            Expr::Sub(a, b) => {
+                r.extend(a.name_uses());
+                r.extend(b.name_uses());
+            }
+            Expr::Mul(a, b) => {
+                r.extend(a.name_uses());
+                r.extend(b.name_uses());
+            }
+            Expr::Div(a, b) => {
+                r.extend(a.name_uses());
+                r.extend(b.name_uses());
+            }
+            Expr::Condition {
+                lhs,
+                rhs,
+                op: _,
+                true_branch,
+                false_branch,
+            } => {
+                r.extend(lhs.name_uses());
+                r.extend(rhs.name_uses());
+                r.extend(true_branch.name_uses());
+                r.extend(false_branch.name_uses());
+            }
+            _ => {}
+        };
+        let mut result = vec![];
+        for item in r {
+            if !result.contains(&item) {
+                result.push(item);
+            }
+        }
+        result
+    }
+}
+
 #[derive(PartialEq, Debug)]
 pub enum Atom {
     Number(f64),
