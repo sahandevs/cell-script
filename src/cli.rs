@@ -1,4 +1,4 @@
-use crate::{ast_interpreter, parser::parse, scanner::scan};
+use crate::{ast_interpreter, ir::code_gen, ir_interpreter, parser::parse, scanner::scan};
 use anyhow::bail;
 use clap::Parser;
 use itertools::Itertools;
@@ -19,6 +19,33 @@ struct Args {
 
     #[clap(short, long)]
     param: Vec<String>,
+
+    #[clap(short, long, default_value_t = InterpreterEngine::IR)]
+    engine: InterpreterEngine,
+}
+
+#[derive(Debug)]
+pub enum InterpreterEngine {
+    IR,
+    AST,
+}
+
+impl Display for InterpreterEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl FromStr for InterpreterEngine {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "ir" => Ok(Self::IR),
+            "ast" => Ok(Self::AST),
+            _ => bail!("unrecognized engine `{}`", s),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -61,6 +88,8 @@ pub fn run() -> Result<(), anyhow::Error> {
         parse(tokens)?
     };
 
+    let ir = code_gen(&ast)?;
+
     // build params
     let mut param_names = Vec::new();
     let mut params_values = Vec::new();
@@ -93,7 +122,12 @@ pub fn run() -> Result<(), anyhow::Error> {
             for (name, value) in param_names.iter().zip(permutation.iter()) {
                 input.insert(name.to_string(), *value);
             }
-            let result = ast_interpreter::run(&ast, cell_names.as_slice(), &input).ok()?;
+            let result = match args.engine {
+                InterpreterEngine::IR => ir_interpreter::run(&ir, &input).ok()?,
+                InterpreterEngine::AST => {
+                    ast_interpreter::run(&ast, cell_names.as_slice(), &input).ok()?
+                }
+            };
             let output = Output {
                 input,
                 output: HashMap::from_iter(result),
