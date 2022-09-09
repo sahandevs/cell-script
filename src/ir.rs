@@ -1,76 +1,134 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Formatter},
+};
 
-use anyhow::Ok;
+use anyhow::{bail, Ok};
 use itertools::Itertools;
 
 use crate::parser::{Atom, Expr, Node, Operator, AST};
 
 pub struct IR<'a> {
     pub instructions: Vec<Instruction<'a>>,
+    pub meta: CodeGenMeta<'a>,
 }
 
 pub type InstAddr = usize;
 
-#[derive(Debug)]
-pub enum Slot<'a> {
-    Accumulator,
-    Var(usize),
-    CellResult(&'a str),
-    Const(f64),
-}
+/// Stack Pointer offset
+pub type SPOffset = usize;
 
-#[derive(Debug)]
 pub enum Instruction<'a> {
-    /// compare A op arg and jump to addr
-    JMPCompare {
-        op: &'a Operator,
-        arg: Slot<'a>,
-        addr: InstAddr,
-    },
+    /// compare A op st and jump to addr
+    JMPIfFalse(InstAddr),
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+    Equal,
+    NotEqual,
+    LoadConst(f64),
     JMP(InstAddr),
-    /// A = A + Slot
-    Add(Slot<'a>),
-    /// A = A - Slot
-    Sub(Slot<'a>),
-    /// A = A * Slot
-    Mul(Slot<'a>),
-    /// A = A % Slot
-    Mod(Slot<'a>),
-    /// do nothing
+    Read(SPOffset),
+    /// push(pop() + pop())
+    Add,
+    /// push(pop() - pop())
+    Sub,
+    /// push(pop() * pop())
+    Mul,
+    /// push(pop() % pop())
+    Mod,
+    /// push(pop() / pop())
+    Div,
     Nop,
-    /// A = A / Slot
-    Div(Slot<'a>),
     /// A = fn_name()
     /// calling convention:
     /// args will be passed as `Var(arg_start + 0), Var(arg_start + 1), Var(arg_start + 2), ...`
-    Call {
-        fn_name: &'a str,
-        arg_start: usize,
-    },
-    Mov {
-        from: Slot<'a>,
-        to: Slot<'a>,
-    },
-    LoadParam {
-        param: &'a str,
-        to: Slot<'a>,
-    },
+    Call(&'a str),
+    /// push(load())
+    LoadParam(&'a str),
+}
+
+impl<'a> Instruction<'a> {
+    fn fmt(&self, ir: &'a IR<'a>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::JMPIfFalse(arg0) => f.debug_tuple("JMPIfFalse").field(arg0).finish(),
+            Self::Greater => write!(f, "Greater"),
+            Self::GreaterEqual => write!(f, "GreaterEqual"),
+            Self::Less => write!(f, "Less"),
+            Self::LessEqual => write!(f, "LessEqual"),
+            Self::Equal => write!(f, "Equal"),
+            Self::NotEqual => write!(f, "NotEqual"),
+            Self::LoadConst(arg0) => f.debug_tuple("LoadConst").field(arg0).finish(),
+            Self::JMP(arg0) => f.debug_tuple("JMP").field(arg0).finish(),
+            Self::Read(arg0) => {
+                // name
+                let mut name = "unknown";
+                for (key, offset) in &ir.meta.cell_addrs {
+                    if *offset == *arg0 {
+                        name = key;
+                        break;
+                    }
+                }
+                f.debug_tuple("Read").field(&name as _).finish()
+            }
+            Self::Add => write!(f, "Add"),
+            Self::Sub => write!(f, "Sub"),
+            Self::Mul => write!(f, "Mul"),
+            Self::Mod => write!(f, "Mod"),
+            Self::Div => write!(f, "Div"),
+            Self::Nop => write!(f, "Nop"),
+            Self::Call(arg0) => f.debug_tuple("Call").field(arg0).finish(),
+            Self::LoadParam(arg0) => f.debug_tuple("LoadParam").field(arg0).finish(),
+        }
+    }
+}
+
+impl<'a> Debug for IR<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        for (addr, inst) in self.instructions.iter().enumerate() {
+            let _ = write!(f, "{}\t:", addr);
+            let _ = inst.fmt(self, f);
+            let _ = write!(f, "\n");
+        }
+        std::fmt::Result::Ok(())
+    }
 }
 
 impl IR<'_> {
     pub fn text(&self) -> String {
-        use std::fmt::Write;
-        let mut result = String::new();
-        for (addr, inst) in self.instructions.iter().enumerate() {
-            let _ = writeln!(result, "{}\t:{:?}", addr, inst);
-        }
-        result
+        format!("{:?}", self)
     }
 }
 
 /////////////////
 /// code gen
 /////////////////
+
+#[derive(Debug, Default)]
+pub struct CodeGenMeta<'a> {
+    pub cell_addrs: HashMap<&'a str, SPOffset>,
+    pub st: SPOffset,
+}
+
+impl<'a> CodeGenMeta<'a> {
+    pub fn find_cell(&self, name: &'a str) -> Result<SPOffset, anyhow::Error> {
+        self.cell_addrs
+            .get(name)
+            .map(|x| *x)
+            .ok_or(anyhow::Error::msg("ident not defined"))
+    }
+
+    pub fn add_cell(&mut self, name: &'a str, spo: SPOffset) {
+        self.cell_addrs.insert(name, spo);
+    }
+
+    pub fn add_st(&mut self) -> SPOffset {
+        let old = self.st;
+        self.st += 1;
+        old
+    }
+}
 
 pub fn code_gen(ast: &AST) -> Result<IR, anyhow::Error> {
     // find dependency graph
@@ -79,22 +137,21 @@ pub fn code_gen(ast: &AST) -> Result<IR, anyhow::Error> {
 
     let mut ir = IR {
         instructions: vec![],
+        meta: CodeGenMeta::default(),
     };
 
     for item in order_of_execution {
         let node = ast.find_node(item).expect("unreachable");
         match node {
-            Node::Param(x) => ir.instructions.push(Instruction::LoadParam {
-                param: &x.name,
-                to: Slot::CellResult(&x.name),
-            }),
+            Node::Param(x) => {
+                ir.instructions.push(Instruction::LoadParam(&x.name));
+                let spo = ir.meta.add_st();
+                ir.meta.add_cell(&x.name, spo);
+            }
             Node::Cell(x) => {
-                let mut sp = 0;
-                code_gen_expr(&mut sp, &x.expr, &mut ir)?;
-                ir.instructions.push(Instruction::Mov {
-                    from: Slot::Accumulator,
-                    to: Slot::CellResult(&x.name),
-                })
+                code_gen_expr(&x.expr, &mut ir)?;
+                let spo = ir.meta.add_st();
+                ir.meta.add_cell(&x.name, spo);
             }
         }
     }
@@ -102,99 +159,54 @@ pub fn code_gen(ast: &AST) -> Result<IR, anyhow::Error> {
     Ok(ir)
 }
 
-pub fn code_gen_expr<'a>(
-    sp: &mut usize,
-    expr: &'a Expr,
-    ir: &mut IR<'a>,
-) -> Result<(), anyhow::Error> {
+pub fn code_gen_expr<'a>(expr: &'a Expr, ir: &mut IR<'a>) -> Result<(), anyhow::Error> {
     match expr {
-        Expr::Atom(x) => match x {
-            Atom::Number(x) => ir.instructions.push(Instruction::Mov {
-                from: Slot::Const(*x),
-                to: Slot::Accumulator,
-            }),
-            Atom::Ident(x) => ir.instructions.push(Instruction::Mov {
-                from: Slot::CellResult(x),
-                to: Slot::Accumulator,
-            }),
-            Atom::Call { name, arguments } => {
-                let arg_start = *sp;
-                for (i, arg) in arguments.iter().enumerate() {
-                    code_gen_expr(sp, arg, ir)?;
-                    ir.instructions.push(Instruction::Mov {
-                        from: Slot::Accumulator,
-                        to: Slot::Var(*sp + i),
-                    });
-                    *sp += 1;
+        Expr::Atom(Atom::Number(x)) => {
+            ir.instructions.push(Instruction::LoadConst(*x));
+        }
+        Expr::Atom(Atom::Ident(name)) => {
+            ir.instructions
+                .push(Instruction::Read(ir.meta.find_cell(name)?));
+        }
+        Expr::Atom(Atom::Call { name, arguments }) => {
+            match name.as_str() {
+                "rand" => {}
+                "int" => {
+                    if arguments.len() != 1 {
+                        bail!("int expects 1 argument")
+                    }
+                    code_gen_expr(&arguments[0], ir)?;
                 }
-                ir.instructions.push(Instruction::Call {
-                    fn_name: name,
-                    arg_start,
-                })
+                x => {
+                    bail!("undefined function {}", x);
+                }
             }
-        },
-        Expr::Add(l, r) => {
-            code_gen_expr(sp, l, ir)?;
-            // mov Left result in Var(0)
-            let target = *sp;
-            ir.instructions.push(Instruction::Mov {
-                from: Slot::Accumulator,
-                to: Slot::Var(target),
-            });
-            *sp += 1;
-            // Right result is in Accumulator
-            code_gen_expr(sp, r, ir)?;
-            // A = Var(0) `Left` + A `Right`
-            ir.instructions.push(Instruction::Add(Slot::Var(target)));
+            ir.instructions.push(Instruction::Call(name));
         }
-        Expr::Mul(l, r) => {
-            code_gen_expr(sp, l, ir)?;
-            // mov Left result in Var(0)
-            let target = *sp;
-            ir.instructions.push(Instruction::Mov {
-                from: Slot::Accumulator,
-                to: Slot::Var(target),
-            });
-            *sp += 1;
-            // Right result is in Accumulator
-            code_gen_expr(sp, r, ir)?;
-            // A = Var(0) `Left` * A `Right`
-            ir.instructions.push(Instruction::Mul(Slot::Var(target)));
+        Expr::Add(lhs, rhs) => {
+            code_gen_expr(rhs, ir)?;
+            code_gen_expr(lhs, ir)?;
+            ir.instructions.push(Instruction::Add);
         }
-        // order is important so we are calculating right first and
-        // moving it in Var(0)
-        Expr::Mod(l, r) => {
-            code_gen_expr(sp, r, ir)?;
-            let target = *sp;
-            ir.instructions.push(Instruction::Mov {
-                from: Slot::Accumulator,
-                to: Slot::Var(target),
-            });
-            *sp += 1;
-            code_gen_expr(sp, l, ir)?;
-            ir.instructions.push(Instruction::Mod(Slot::Var(target)));
+        Expr::Mod(lhs, rhs) => {
+            code_gen_expr(rhs, ir)?;
+            code_gen_expr(lhs, ir)?;
+            ir.instructions.push(Instruction::Mod);
         }
-        Expr::Sub(l, r) => {
-            code_gen_expr(sp, r, ir)?;
-            let target = *sp;
-            ir.instructions.push(Instruction::Mov {
-                from: Slot::Accumulator,
-                to: Slot::Var(target),
-            });
-            *sp += 1;
-            code_gen_expr(sp, l, ir)?;
-            ir.instructions.push(Instruction::Sub(Slot::Var(target)));
+        Expr::Sub(lhs, rhs) => {
+            code_gen_expr(rhs, ir)?;
+            code_gen_expr(lhs, ir)?;
+            ir.instructions.push(Instruction::Sub);
         }
-        Expr::Div(l, r) => {
-            code_gen_expr(sp, r, ir)?;
-            let target = *sp;
-            ir.instructions.push(Instruction::Mov {
-                from: Slot::Accumulator,
-                to: Slot::Var(target),
-            });
-            *sp += 1;
-            code_gen_expr(sp, l, ir)?;
-            ir.instructions.push(Instruction::Div(Slot::Var(target)));
+        Expr::Mul(lhs, rhs) => {
+            code_gen_expr(rhs, ir)?;
+            code_gen_expr(lhs, ir)?;
+            ir.instructions.push(Instruction::Mul);
+        }
+        Expr::Div(lhs, rhs) => {
+            code_gen_expr(rhs, ir)?;
+            code_gen_expr(lhs, ir)?;
+            ir.instructions.push(Instruction::Div);
         }
         Expr::Condition {
             lhs,
@@ -203,45 +215,32 @@ pub fn code_gen_expr<'a>(
             true_branch,
             false_branch,
         } => {
-            code_gen_expr(sp, rhs, ir)?;
-            let rhs_val = *sp;
-            ir.instructions.push(Instruction::Mov {
-                from: Slot::Accumulator,
-                to: Slot::Var(rhs_val),
-            });
-            *sp += 1;
-            code_gen_expr(sp, lhs, ir)?;
-            // A == left & Var(0) == right
-            // placeholder jump instructions
-            ir.instructions.push(Instruction::Nop);
-            let jmp_cmp_addr = ir.instructions.len() - 1;
-            // false branch == don't jump so the layout will be something like this:
-            //      JMPCompare
-            //      false_branch
-            //      false_branch
-            //      false_branch
-            //      JMP :end
-            // a:   true_branch
-            //      true_branch
-            //      true_branch
-            //      true_branch
-            // end: NOP
-            code_gen_expr(sp, false_branch, ir)?;
-            ir.instructions.push(Instruction::Nop);
-            let false_branch_jmp_addr = ir.instructions.len() - 1;
-            let true_branch_start_addr = ir.instructions.len();
-            code_gen_expr(sp, true_branch, ir)?;
-            ir.instructions.push(Instruction::Nop);
-            let last_nop_instr_addr = ir.instructions.len() - 1;
-
-            ir.instructions[jmp_cmp_addr] = Instruction::JMPCompare {
-                op,
-                arg: Slot::Var(rhs_val),
-                addr: true_branch_start_addr,
+            code_gen_expr(rhs, ir)?;
+            code_gen_expr(lhs, ir)?;
+            match op {
+                Operator::Equals => ir.instructions.push(Instruction::Equal),
+                Operator::Greater => ir.instructions.push(Instruction::Greater),
+                Operator::GreaterEqual => ir.instructions.push(Instruction::GreaterEqual),
+                Operator::Less => ir.instructions.push(Instruction::Less),
+                Operator::LessEqual => ir.instructions.push(Instruction::LessEqual),
             };
-            ir.instructions[false_branch_jmp_addr] = Instruction::JMP(last_nop_instr_addr);
+            ir.instructions.push(Instruction::JMPIfFalse(0));
+            let jmp_if_idx = ir.instructions.len() - 1;
+            // true branch
+            code_gen_expr(true_branch, ir)?;
+            ir.instructions.push(Instruction::JMP(0));
+            let true_branch_jmp_idx = ir.instructions.len() - 1;
+            // false branch
+            code_gen_expr(false_branch, ir)?;
+            ir.instructions.push(Instruction::Nop);
+            let target_idx = ir.instructions.len() - 1;
+            // back patching
+
+            // next instruction of true branch (after the jump) is the false branch
+            ir.instructions[jmp_if_idx] = Instruction::JMPIfFalse(true_branch_jmp_idx + 1);
+            ir.instructions[true_branch_jmp_idx] = Instruction::JMP(target_idx);
         }
-    };
+    }
     Ok(())
 }
 
@@ -317,38 +316,27 @@ mod tests {
         compare_generated_code(
             include_str!("../examples/example_1.cell"),
             r#"
-            0:LoadParam { param: "p1", to: CellResult("p1") }
-            1:Mov { from: CellResult("p1"), to: Accumulator }
-            2:Mov { from: Accumulator, to: Var(0) }
-            3:Mov { from: Const(1.0), to: Accumulator }
-            4:Add(Var(0))
-            5:Mov { from: Accumulator, to: CellResult("c") }
-            6:Mov { from: Const(5.0), to: Accumulator }
-            7:Mov { from: Accumulator, to: Var(0) }
-            8:Mov { from: CellResult("c"), to: Accumulator }
-            9:Add(Var(0))
-            10:Mov { from: Accumulator, to: CellResult("a") }
-            11:LoadParam { param: "p2", to: CellResult("p2") }
-            12:Mov { from: CellResult("p1"), to: Accumulator }
-            13:Mov { from: Accumulator, to: Var(0) }
-            14:Mov { from: CellResult("p2"), to: Accumulator }
-            15:Mov { from: Accumulator, to: Var(1) }
-            16:Mov { from: CellResult("p2"), to: Accumulator }
-            17:Mov { from: Accumulator, to: Var(2) }
-            18:Mov { from: CellResult("a"), to: Accumulator }
-            19:Mov { from: Accumulator, to: Var(3) }
-            20:Mov { from: CellResult("p2"), to: Accumulator }
-            21:Mov { from: Accumulator, to: Var(4) }
-            22:Mov { from: Const(1.0), to: Accumulator }
-            23:Add(Var(4))
-            24:Mov { from: Accumulator, to: Var(5) }
-            25:Mov { from: CellResult("p1"), to: Accumulator }
-            26:Div(Var(5))
-            27:Mul(Var(3))
-            28:Add(Var(2))
-            29:Mul(Var(1))
-            30:Add(Var(0))
-            31:Mov { from: Accumulator, to: CellResult("test") }
+            0:LoadParam("p1")
+            1:LoadConst(1.0)
+            2:Read("p1")
+            3:Add
+            4:Read("c")
+            5:LoadConst(5.0)
+            6:Add
+            7:LoadParam("p2")
+            8:LoadConst(1.0)
+            9:Read("p2")
+            10:Add
+            11:Read("p1")
+            12:Div
+            13:Read("a")
+            14:Mul
+            15:Read("p2")
+            16:Add
+            17:Read("p2")
+            18:Mul
+            19:Read("p1")
+            20:Add
         "#,
         );
     }
@@ -358,65 +346,46 @@ mod tests {
         compare_generated_code(
             include_str!("../examples/example_2.cell"),
             r#"
-            0:Call { fn_name: "rand", arg_start: 0 }
-            1:Mov { from: Accumulator, to: Var(0) }
-            2:Mov { from: Const(22.0), to: Accumulator }
-            3:Mul(Var(0))
-            4:Mov { from: Accumulator, to: Var(1) }
-            5:Mov { from: Const(3.0), to: Accumulator }
-            6:Add(Var(1))
-            7:Mov { from: Accumulator, to: CellResult("F") }
-            8:LoadParam { param: "studentnumber", to: CellResult("studentnumber") }
-            9:Mov { from: Const(0.0), to: Accumulator }
-            10:Mov { from: Accumulator, to: Var(0) }
-            11:Mov { from: Const(2.0), to: Accumulator }
-            12:Mov { from: Accumulator, to: Var(1) }
-            13:Mov { from: CellResult("studentnumber"), to: Accumulator }
-            14:Mod(Var(1))
-            15:JMPCompare { op: Equals, arg: Var(0), addr: 21 }
-            16:Mov { from: Const(3.0), to: Accumulator }
-            17:Mov { from: Accumulator, to: Var(2) }
-            18:Mov { from: CellResult("studentnumber"), to: Accumulator }
-            19:Div(Var(2))
-            20:JMP(25)
-            21:Mov { from: Const(2.0), to: Accumulator }
-            22:Mov { from: Accumulator, to: Var(3) }
-            23:Mov { from: CellResult("studentnumber"), to: Accumulator }
-            24:Div(Var(3))
-            25:Nop
-            26:Mov { from: Accumulator, to: CellResult("f") }
-            27:Call { fn_name: "rand", arg_start: 0 }
-            28:Mov { from: Accumulator, to: Var(0) }
-            29:Mov { from: Const(10.0), to: Accumulator }
-            30:Mul(Var(0))
-            31:Mov { from: Accumulator, to: Var(1) }
-            32:Call { fn_name: "int", arg_start: 0 }
-            33:Mov { from: Accumulator, to: CellResult("t") }
-            34:Call { fn_name: "rand", arg_start: 0 }
-            35:Mov { from: Accumulator, to: Var(0) }
-            36:Mov { from: Const(4.5), to: Accumulator }
-            37:Mul(Var(0))
-            38:Mov { from: Accumulator, to: Var(1) }
-            39:Mov { from: Const(0.5), to: Accumulator }
-            40:Add(Var(1))
-            41:Mov { from: Accumulator, to: CellResult("m") }
-            42:Mov { from: Const(2.0), to: Accumulator }
-            43:Mov { from: Accumulator, to: Var(0) }
-            44:Mov { from: CellResult("m"), to: Accumulator }
-            45:Mul(Var(0))
-            46:Mov { from: Accumulator, to: Var(1) }
-            47:Mov { from: CellResult("t"), to: Accumulator }
-            48:Mul(Var(1))
-            49:Mov { from: Accumulator, to: Var(2) }
-            50:Mov { from: CellResult("f"), to: Accumulator }
-            51:Div(Var(2))
-            52:Mov { from: Accumulator, to: Var(3) }
-            53:Mov { from: CellResult("t"), to: Accumulator }
-            54:Mov { from: Accumulator, to: Var(4) }
-            55:Mov { from: CellResult("f"), to: Accumulator }
-            56:Div(Var(4))
-            57:Sub(Var(3))
-            58:Mov { from: Accumulator, to: CellResult("V") }
+            0:LoadConst(3.0)
+            1:LoadConst(22.0)
+            2:Call("rand")
+            3:Mul
+            4:Add
+            5:LoadParam("studentnumber")
+            6:LoadConst(0.0)
+            7:LoadConst(2.0)
+            8:Read("studentnumber")
+            9:Mod
+            10:Equal
+            11:JMPIfFalse(16)
+            12:LoadConst(2.0)
+            13:Read("studentnumber")
+            14:Div
+            15:JMP(19)
+            16:LoadConst(3.0)
+            17:Read("studentnumber")
+            18:Div
+            19:Nop
+            20:LoadConst(10.0)
+            21:Call("rand")
+            22:Mul
+            23:Call("int")
+            24:LoadConst(0.5)
+            25:LoadConst(4.5)
+            26:Call("rand")
+            27:Mul
+            28:Add
+            29:Read("t")
+            30:Read("m")
+            31:LoadConst(2.0)
+            32:Mul
+            33:Mul
+            34:Read("f")
+            35:Div
+            36:Read("t")
+            37:Read("f")
+            38:Div
+            39:Sub
         "#,
         );
     }

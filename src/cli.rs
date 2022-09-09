@@ -1,4 +1,4 @@
-use crate::{ast_interpreter, ir::code_gen, ir_interpreter, parser::parse, scanner::scan};
+use crate::{ast_interpreter, ir::code_gen, vm, parser::parse, scanner::scan};
 use anyhow::bail;
 use clap::Parser;
 use itertools::Itertools;
@@ -123,7 +123,7 @@ pub fn run() -> Result<(), anyhow::Error> {
                 input.insert(name.to_string(), *value);
             }
             let result = match args.engine {
-                InterpreterEngine::IR => ir_interpreter::run(&ir, &input).ok()?,
+                InterpreterEngine::IR => vm::run(&ir, &input).ok()?,
                 InterpreterEngine::AST => {
                     ast_interpreter::run(&ast, cell_names.as_slice(), &input).ok()?
                 }
