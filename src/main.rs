@@ -4,6 +4,7 @@ pub mod ir;
 pub mod vm;
 pub mod parser;
 pub mod scanner;
+pub mod cranelift;
 
 fn main() {
     if let Err(e) = cli::run() {

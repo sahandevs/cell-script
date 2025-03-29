@@ -1,4 +1,4 @@
-use crate::{ast_interpreter, ir::code_gen, vm, parser::parse, scanner::scan};
+use crate::{ast_interpreter, ir::code_gen, parser::parse, scanner::scan, vm};
 use anyhow::bail;
 use clap::Parser;
 use itertools::Itertools;
@@ -20,28 +20,29 @@ struct Args {
     #[clap(short, long)]
     param: Vec<String>,
 
-    #[clap(short, long, default_value_t = InterpreterEngine::IR)]
-    engine: InterpreterEngine,
+    #[clap(short, long, default_value_t = Engine::VM)]
+    engine: Engine,
 }
 
 #[derive(Debug)]
-pub enum InterpreterEngine {
-    IR,
+pub enum Engine {
+    VM,
     AST,
+    Cranelift,
 }
 
-impl Display for InterpreterEngine {
+impl Display for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl FromStr for InterpreterEngine {
+impl FromStr for Engine {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "ir" => Ok(Self::IR),
+            "ir" => Ok(Self::VM),
             "ast" => Ok(Self::AST),
             _ => bail!("unrecognized engine `{}`", s),
         }
@@ -123,10 +124,9 @@ pub fn run() -> Result<(), anyhow::Error> {
                 input.insert(name.to_string(), *value);
             }
             let result = match args.engine {
-                InterpreterEngine::IR => vm::run(&ir, &input).ok()?,
-                InterpreterEngine::AST => {
-                    ast_interpreter::run(&ast, cell_names.as_slice(), &input).ok()?
-                }
+                Engine::VM => vm::run(&ir, &input).ok()?,
+                Engine::AST => ast_interpreter::run(&ast, cell_names.as_slice(), &input).ok()?,
+                Engine::Cranelift => todo!(),
             };
             let output = Output {
                 input,
