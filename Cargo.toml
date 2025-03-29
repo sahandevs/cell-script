@@ -13,6 +13,8 @@ serde_json = "1"
 itertools = "0.10"
 rayon = "1.5"
 rand = "0.8"
+cranelift-frontend = "0.117.2"
+cranelift-codegen = "0.117.2"
 
 [dev-dependencies]
 pretty_assertions = "1.2"
