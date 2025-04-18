@@ -1,5 +1,6 @@
 pub mod ast_interpreter;
 pub mod cli;
+pub mod lsp;
 pub mod ir;
 pub mod vm;
 pub mod parser;

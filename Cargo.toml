@@ -16,5 +16,12 @@ rand = "0.8"
 cranelift-frontend = "0.117.2"
 cranelift-codegen = "0.117.2"
 
+
+# lsp stuff
+tokio = { version = "1.17.0", features = ["full"] }
+tower-lsp = { version = "0.20.0", features = ["proposed"] }
+dashmap = "6.1.0"
+log = "0.4.27"
+
 [dev-dependencies]
 pretty_assertions = "1.2"

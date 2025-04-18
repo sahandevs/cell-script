@@ -1,4 +1,4 @@
-use crate::{ast_interpreter, ir::code_gen, parser::parse, scanner::scan, vm};
+use crate::{ast_interpreter, ir::code_gen, lsp::start_lsp, parser::parse, scanner::scan, vm};
 use anyhow::bail;
 use clap::Parser;
 use itertools::Itertools;
@@ -29,6 +29,8 @@ pub enum Engine {
     VM,
     AST,
     Cranelift,
+
+    LSP,
 }
 
 impl Display for Engine {
@@ -42,8 +44,9 @@ impl FromStr for Engine {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "ir" => Ok(Self::VM),
+            "ir" | "vm" => Ok(Self::VM),
             "ast" => Ok(Self::AST),
+            "lsp" => Ok(Self::LSP),
             _ => bail!("unrecognized engine `{}`", s),
         }
     }
@@ -81,6 +84,10 @@ struct Output {
 
 pub fn run() -> Result<(), anyhow::Error> {
     let args = Args::parse();
+
+    if matches!(args.engine, Engine::LSP) {
+        start_lsp();
+    }
 
     // parse code and build AST
     let ast = {
@@ -127,6 +134,7 @@ pub fn run() -> Result<(), anyhow::Error> {
                 Engine::VM => vm::run(&ir, &input).ok()?,
                 Engine::AST => ast_interpreter::run(&ast, cell_names.as_slice(), &input).ok()?,
                 Engine::Cranelift => todo!(),
+                Engine::LSP => unreachable!(),
             };
             let output = Output {
                 input,
