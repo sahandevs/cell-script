@@ -15,6 +15,11 @@ rayon = "1.5"
 rand = "0.8"
 cranelift-frontend = "0.117.2"
 cranelift-codegen = "0.117.2"
+cranelift-jit = "0.117.2"
+cranelift-native = "0.117.2"
+cranelift-module = "0.117.2"
+cranelift = "0.117.2"
+indexmap = "2.9.0"
 
 [dev-dependencies]
 pretty_assertions = "1.2"

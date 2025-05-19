@@ -1,60 +1,85 @@
 use std::collections::HashMap;
 
+use cranelift::prelude::*;
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::condcodes::FloatCC;
+use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::{types::*, Block};
-use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, Signature, UserFuncName};
-use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, UserFuncName};
 use cranelift_codegen::verifier::verify_function;
 use cranelift_codegen::{settings, write_function};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::{DataDescription, Linkage, Module};
 
 use crate::ir as CellIR;
 
-pub fn jit_compile(ir: &CellIR::IR) -> String {
-    let mut sig = Signature::new(CallConv::Fast);
+// copied from https://github.com/bytecodealliance/cranelift-jit-demo/blob/main/src/jit.rs
+/// The basic JIT class.
+pub struct JIT {
+    /// The function builder context, which is reused across multiple
+    /// FunctionBuilder instances.
+    builder_context: FunctionBuilderContext,
 
-    let param_to_sig_idx: Vec<_> = ir
-        .instructions
-        .iter()
-        .filter_map(|x| {
-            if let CellIR::Instruction::LoadParam(param) = x {
-                Some(*param)
-            } else {
-                None
-            }
-        })
-        .collect();
-    for _ in param_to_sig_idx.iter() {
-        sig.params.push(AbiParam::new(F64));
-    }
+    /// The main Cranelift context, which holds the state for codegen. Cranelift
+    /// separates this from `Module` to allow for parallel compilation, with a
+    /// context per thread, though this isn't in the simple demo here.
+    ctx: codegen::Context,
 
-    let cell_ret_sig_idx: Vec<_> = ir.meta.cell_addrs.iter().map(|(k, _)| *k).collect();
-    for _ in cell_ret_sig_idx.iter() {
-        sig.returns.push(AbiParam::new(F64));
+    /// The data description, which is to data objects what `ctx` is to functions.
+    data_description: DataDescription,
+
+    /// The module, with the jit backend, which manages the JIT'd
+    /// functions.
+    module: JITModule,
+}
+
+impl Default for JIT {
+    fn default() -> Self {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("use_colocated_libcalls", "false").unwrap();
+        flag_builder.set("is_pic", "false").unwrap();
+        flag_builder.set("opt_level", "speed").unwrap();
+
+        let flags = settings::Flags::new(flag_builder);
+
+        let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
+            panic!("host machine is not supported: {}", msg);
+        });
+        let isa = isa_builder.finish(flags).unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+
+        let module = JITModule::new(builder);
+        Self {
+            builder_context: FunctionBuilderContext::new(),
+            ctx: module.make_context(),
+            data_description: DataDescription::new(),
+            module,
+        }
     }
+}
+
+pub fn jit_compile(ir: &CellIR::IR, param_order: &[&str]) -> String {
+    let mut jit = JIT::default();
+
+    // in array
+    jit.ctx
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(jit.module.target_config().pointer_type()));
+    // out array
+    jit.ctx
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(jit.module.target_config().pointer_type()));
 
     let mut fn_builder_ctx = FunctionBuilderContext::new();
-    let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
     {
-        let mut builder = FunctionBuilder::new(&mut func, &mut fn_builder_ctx);
+        let mut builder = FunctionBuilder::new(&mut jit.ctx.func, &mut fn_builder_ctx);
 
         let block0 = builder.create_block();
-        // function parameters
-        let mut param_vars = vec![];
-        for (i, _) in param_to_sig_idx.iter().enumerate() {
-            let var = Variable::new(i);
-            builder.declare_var(var, F64);
-            param_vars.push(var);
-        }
-
-        // storage for cell results:
-        let mut cell_vars = vec![];
-        for (i, _) in cell_ret_sig_idx.iter().enumerate() {
-            let var = Variable::new(param_vars.len() + i);
-            builder.declare_var(var, F64);
-            cell_vars.push(var);
-        }
 
         /* stack and temporary vars */
         let mut stack_vars: Vec<Variable> = vec![];
@@ -65,7 +90,7 @@ pub fn jit_compile(ir: &CellIR::IR) -> String {
             };
             (push) => {{
                 let var = if stack_vars.len() <= current_stack.len() {
-                    let var = Variable::new(param_vars.len() + cell_vars.len() + stack_vars.len());
+                    let var = Variable::new(stack_vars.len());
                     builder.declare_var(var, F64);
                     stack_vars.push(var);
                     var
@@ -76,19 +101,22 @@ pub fn jit_compile(ir: &CellIR::IR) -> String {
                 current_stack.push(var);
                 var
             }};
+            (push + $expr:expr) => {{
+                let x = current_stack[$expr].clone();
+                current_stack.push(x.clone());
+                x
+            }};
+            (push $var:expr) => {{
+                let x = $var;
+                current_stack.push(x.clone());
+                var
+            }};
         }
         /* end of stack and temporary vars */
 
         builder.append_block_params_for_function_params(block0);
         builder.seal_block(block0);
         builder.switch_to_block(block0);
-        // assign function parameters from block
-        {
-            let block_params: Vec<_> = builder.block_params(block0).iter().cloned().collect();
-            for (block, par) in block_params.iter().zip(param_vars.iter()) {
-                builder.def_var(par.clone(), *block);
-            }
-        }
 
         let mut blocks: HashMap<usize, Block> = HashMap::new();
         let entry_block = builder.create_block();
@@ -119,7 +147,9 @@ pub fn jit_compile(ir: &CellIR::IR) -> String {
         }
 
         for (i, inst) in ir.instructions.iter().enumerate() {
+            println!(".{} {:?}", i, inst);
             if let Some(block) = blocks.get(&i) {
+                println!("..switching to {:?}", block);
                 builder.switch_to_block(*block);
             }
             match inst {
@@ -141,25 +171,21 @@ pub fn jit_compile(ir: &CellIR::IR) -> String {
                     builder.def_var(out, tmp);
                 }
                 CellIR::Instruction::Read(offset) => {
-                    // convert offset to the name then name to variable
-                    let name = ir
-                        .meta
-                        .cell_addrs
-                        .iter()
-                        .find(|(_, v)| *v == offset)
-                        .map(|x| *x.0)
-                        .unwrap();
-                    let idx = cell_ret_sig_idx.iter().position(|x| *x == name).unwrap();
-
-                    let out = stack!(push);
-                    let val = builder.use_var(cell_vars[idx]);
-                    builder.def_var(out, val);
+                    stack!(push + *offset);
                 }
                 CellIR::Instruction::LoadParam(name) => {
+                    let in_val = *builder.block_params(block0).first().unwrap();
                     let out = stack!(push);
-                    let idx = param_to_sig_idx.iter().position(|x| x == name).unwrap();
-                    let val = builder.use_var(param_vars[idx]);
-                    builder.def_var(out, val);
+
+                    let offset = param_order.iter().position(|x| x == name).unwrap();
+
+                    let out_val = builder.ins().load(
+                        F64,
+                        MemFlags::trusted(),
+                        in_val,
+                        Offset32::new((offset * 0) as _),
+                    );
+                    builder.def_var(out, out_val);
                 }
 
                 // TODO: factor out duplicate code
@@ -258,24 +284,92 @@ pub fn jit_compile(ir: &CellIR::IR) -> String {
             }
         }
 
-        // return cell results in order in the last block
-        let vals: Vec<_> = cell_vars.iter().map(|var| builder.use_var(*var)).collect();
-        builder.ins().return_(&vals);
+        /*
 
+        the final resulting stack is enough, we can use metadata to determine which offset
+        is what. example run:
+        v0 = test1
+        v1 = test2
+
+        params var [var0, var1] ["test1", "test2"]
+        cell var [var2, var3, var4, var5] ["test1", "a", "test2", "b"]
+
+        .0 LoadParam("test1")     [v0]
+        v3 = .1 LoadConst(2.0)    [v0, v3]
+        v4 = .2 LoadConst(13.0)   [v0, v3, v4]
+        v5 = .3 Add               [v0, v5]
+        .4 Read(0)                [v0, v5, v0]
+        v6 = .5 Add               [v0, v6]
+        .6 LoadParam("test2")     [v0, v6, v1]
+        .7 Read(1)                [v0, v6, v1, v6]
+        .8 Read(2)                [v0, v6, v1, v6, v1]
+        v7 = .9 Add               [v0, v6, v1, v7]
+        .10 Read(0)               [v0, v6, v1, v7, v0]
+        v8 =.11 Add               [v0, v6, v1, v8]
+                 */
+
+        // return cell results in order in the last block
+        let vals: Vec<_> = stack_vars.iter().map(|var| builder.use_var(*var)).collect();
+
+        let out_val = *builder.block_params(block0).last().unwrap();
+        for (i, val) in vals.iter().enumerate() {
+            builder.ins().store(
+                MemFlags::trusted(),
+                *val,
+                out_val,
+                Offset32::new((i * 8) as _),
+            );
+        }
+
+        builder.ins().return_(&[]);
         builder.seal_all_blocks();
         builder.finalize();
     }
 
-    let flags = settings::Flags::new(settings::builder());
+    // let flags = settings::Flags::new(settings::builder());
+    // jit.ctx.
+    // let res = verify_function(&jit.ctx.func, &flags);
+    // println!("{}", jit.ctx.func.display());
+    // if let Err(errors) = res {
+    //     panic!("{}", errors);
+    // }
 
-    let res = verify_function(&func, &flags);
-    println!("{}", func.display());
-    if let Err(errors) = res {
-        panic!("{}", errors);
-    }
+    let id = jit
+        .module
+        .declare_function("run", Linkage::Export, &jit.ctx.func.signature)
+        .map_err(|e| e.to_string())
+        .unwrap();
+
+    // Define the function to jit. This finishes compilation, although
+    // there may be outstanding relocations to perform. Currently, jit
+    // cannot finish relocations until all functions to be called are
+    // defined. For this toy demo for now, we'll just finalize the
+    // function below.
+    jit.module
+        .define_function(id, &mut jit.ctx)
+        .map_err(|e| e.to_string())
+        .unwrap();
 
     let mut buf = String::new();
-    write_function(&mut buf, &func).unwrap();
+    write_function(&mut buf, &jit.ctx.func).unwrap();
+    println!("{}", buf);
+    // Now that compilation is finished, we can clear out the context state.
+    jit.module.clear_context(&mut jit.ctx);
+
+    // Finalize the functions which we just defined, which resolves any
+    // outstanding relocations (patching in addresses, now that they're
+    // available).
+    jit.module.finalize_definitions().unwrap();
+
+    // We can now retrieve a pointer to the machine code.
+    let code = jit.module.get_finalized_function(id);
+    unsafe {
+        let code_fn = std::mem::transmute::<_, fn(*mut f64, *mut f64)>(code);
+        let mut out = [0f64, 0f64, 0f64, 0f64];
+        code_fn([1f64, 2f64].as_mut_ptr(), out.as_mut_ptr());
+        println!("run result = {:?}", out);
+    }
+
     // TODO: https://github.com/bytecodealliance/cranelift-jit-demo/blob/main/src/bin/toy.rs
     buf
 }
@@ -291,40 +385,34 @@ mod tests {
 
     #[test]
     pub fn test_example_1() {
-        let code = include_str!("../examples/example_1.cell");
+        let code = r#"
+        param test1;
+        param test2;
+        cell a: test1 + 13 + 2;
+        cell b: test1 + test2 + a;
+        "#;
         let ast = parse(code);
         let ir = code_gen(&ast).unwrap();
+        println!("{:?}", ir);
 
-        assert_eq!(
-            super::jit_compile(&ir).trim(),
+        pretty_assertions::assert_eq!(
+            super::jit_compile(&ir, &["test1", "test2"]).trim(),
             r#"
-function u0:0(f64, f64) -> f64, f64, f64, f64, f64 fast {
-block0(v0: f64, v1: f64):
-    v22 = f64const 0.0
-    v21 -> v22
-    v16 = f64const 0.0
-    v15 -> v16
-    v12 = f64const 0.0
-    v11 -> v12
-    v7 = f64const 0.0
-    v6 -> v7
-    v4 = f64const 0.0
-    v3 -> v4
+function u0:0(i64, i64) system_v {
+block0(v0: i64, v1: i64):
     jump block1
 
 block1:
-    v2 = f64const 0x1.0000000000000p0
-    v5 = fadd.f64 v4, v2  ; v4 = 0.0, v2 = 0x1.0000000000000p0
-    v8 = f64const 0x1.4000000000000p2
-    v9 = fadd v8, v7  ; v8 = 0x1.4000000000000p2, v7 = 0.0
-    v10 = f64const 0x1.0000000000000p0
-    v13 = fadd.f64 v12, v10  ; v12 = 0.0, v10 = 0x1.0000000000000p0
-    v14 = fdiv.f64 v3, v13  ; v3 = 0.0
-    v17 = fmul.f64 v16, v14  ; v16 = 0.0
-    v18 = fadd.f64 v11, v17  ; v11 = 0.0
-    v19 = fmul.f64 v11, v18  ; v11 = 0.0
-    v20 = fadd.f64 v3, v19  ; v3 = 0.0
-    return v6, v11, v15, v3, v22  ; v6 = 0.0, v11 = 0.0, v15 = 0.0, v3 = 0.0, v22 = 0.0
+    v2 = load.f64 notrap aligned v0
+    store notrap aligned v2, v1
+    v10 = f64const 0x1.e000000000000p3
+    v6 = fadd v2, v10  ; v10 = 0x1.e000000000000p3
+    store notrap aligned v6, v1+8
+    store notrap aligned v2, v1+16
+    v8 = fadd v2, v6
+    v9 = fadd v2, v8
+    store notrap aligned v9, v1+24
+    return
 }
         "#
             .trim()

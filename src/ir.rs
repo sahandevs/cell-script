@@ -18,6 +18,7 @@ pub type InstAddr = usize;
 /// Stack Pointer offset
 pub type SPOffset = usize;
 
+#[derive(Debug)]
 pub enum Instruction<'a> {
     /// compare A op st and jump to addr
     JMPIfFalse(InstAddr),
@@ -107,7 +108,7 @@ impl IR<'_> {
 
 #[derive(Debug, Default)]
 pub struct CodeGenMeta<'a> {
-    pub cell_addrs: HashMap<&'a str, SPOffset>,
+    pub cell_addrs: indexmap::IndexMap<&'a str, SPOffset>,
     pub st: SPOffset,
 }
 
