@@ -14,6 +14,11 @@ use cranelift_module::{DataDescription, Linkage, Module};
 
 use crate::ir as CellIR;
 
+#[no_mangle]
+extern "C" fn host_rand() -> f64 {
+    rand::random::<f64>()
+}
+
 // copied from https://github.com/bytecodealliance/cranelift-jit-demo/blob/main/src/jit.rs
 /// The basic JIT class.
 pub struct JIT {
@@ -47,8 +52,8 @@ impl Default for JIT {
             panic!("host machine is not supported: {}", msg);
         });
         let isa = isa_builder.finish(flags).unwrap();
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        builder.symbol("host_rand", host_rand as *const u8);
         let module = JITModule::new(builder);
         Self {
             builder_context: FunctionBuilderContext::new(),
@@ -74,6 +79,14 @@ pub fn jit_compile(ir: &CellIR::IR, param_order: &[&str]) -> String {
         .signature
         .params
         .push(AbiParam::new(jit.module.target_config().pointer_type()));
+
+    let rand_func_id = {
+        let mut rand_sig = jit.module.make_signature();
+        rand_sig.returns.push(AbiParam::new(F64));
+        jit.module
+            .declare_function("host_rand", Linkage::Import, &rand_sig)
+            .unwrap()
+    };
 
     let mut fn_builder_ctx = FunctionBuilderContext::new();
     {
@@ -153,7 +166,6 @@ pub fn jit_compile(ir: &CellIR::IR, param_order: &[&str]) -> String {
                 builder.switch_to_block(*block);
             }
             match inst {
-                CellIR::Instruction::Call(_) => todo!(),
                 CellIR::Instruction::JMPIfFalse(target) => {
                     let a = builder.use_var(stack!(pop));
                     let target_block = *blocks.get(target).unwrap();
@@ -187,6 +199,25 @@ pub fn jit_compile(ir: &CellIR::IR, param_order: &[&str]) -> String {
                     );
                     builder.def_var(out, out_val);
                 }
+
+                CellIR::Instruction::Call(name) => match *name {
+                    "int" => {
+                        let arg = builder.use_var(stack!(pop));
+                        let result = builder.ins().trunc(arg);
+                        let out = stack!(push);
+                        builder.def_var(out, result);
+                    }
+                    "rand" => {
+                        let func_ref = jit
+                            .module
+                            .declare_func_in_func(rand_func_id, &mut builder.func);
+                        let call = builder.ins().call(func_ref, &[]);
+                        let result = builder.inst_results(call)[0];
+                        let out = stack!(push);
+                        builder.def_var(out, result);
+                    }
+                    _ => panic!("unknown fn {name}"),
+                },
 
                 // TODO: factor out duplicate code
                 // TODO: compare inst return int, we should cast them into float and
@@ -388,8 +419,9 @@ mod tests {
         let code = r#"
         param test1;
         param test2;
-        cell a: test1 + 13 + 2;
-        cell b: test1 + test2 + a;
+        cell k: rand() + 1.5;
+        cell a: test1 + 13 + 2 + k;
+        cell b: int(test1 + test2 + a);
         "#;
         let ast = parse(code);
         let ir = code_gen(&ast).unwrap();
@@ -399,19 +431,31 @@ mod tests {
             super::jit_compile(&ir, &["test1", "test2"]).trim(),
             r#"
 function u0:0(i64, i64) system_v {
+    sig0 = () -> f64 system_v
+    fn0 = u0:0 sig0
+
 block0(v0: i64, v1: i64):
     jump block1
 
 block1:
     v2 = load.f64 notrap aligned v0
+    v4 = call fn0()
+    v11 = load.f64 notrap aligned v0
     store notrap aligned v2, v1
-    v10 = f64const 0x1.e000000000000p3
-    v6 = fadd v2, v10  ; v10 = 0x1.e000000000000p3
-    store notrap aligned v6, v1+8
-    store notrap aligned v2, v1+16
-    v8 = fadd v2, v6
-    v9 = fadd v2, v8
-    store notrap aligned v9, v1+24
+    v3 = f64const 0x1.8000000000000p0
+    v5 = fadd v4, v3  ; v3 = 0x1.8000000000000p0
+    store notrap aligned v5, v1+8
+    v8 = f64const 0x1.a000000000000p3
+    v6 = f64const 0x1.0000000000000p1
+    v7 = fadd v6, v5  ; v6 = 0x1.0000000000000p1
+    v9 = fadd v8, v7  ; v8 = 0x1.a000000000000p3
+    v10 = fadd v2, v9
+    store notrap aligned v10, v1+16
+    store notrap aligned v11, v1+24
+    v12 = fadd v11, v10
+    v13 = fadd v2, v12
+    v14 = trunc v13
+    store notrap aligned v14, v1+32
     return
 }
         "#
